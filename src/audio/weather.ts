@@ -6,7 +6,7 @@
 //  - rain: a stereo hiss bed (pink noise, brighter as it gets heavier), a low roar in the storm, and rain
 //    on the water (a loop of tiny clicks and bubble plinks, a second denser layer in the storm)
 //  - thunder on 'weather:lightning': delayed by distance (true time for near strikes, far ones compressed
-//    into 3 s so they fit the 15 s day), a sharp crack for near strikes, then a rolling low rumble;
+//    into 3 s so they fit the 20 s day), a sharp crack for near strikes, then a rolling low rumble;
 //    loudness from strength and distance
 //  - storm wind: a gusting howl band on top of ./wind (which also leans harder into its gusts)
 //  - night: a cricket chorus and a frog chorus (tree frogs also call in the rain)

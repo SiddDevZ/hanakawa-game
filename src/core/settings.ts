@@ -61,7 +61,7 @@ export interface Settings {
   invertY: boolean;
   showMarker: boolean;
   units: 'knots' | 'kmh';
-  /** a whole day every 15 s with changing weather (src/core/daycycle.ts) */
+  /** a whole day every 20 s with changing weather (src/core/daycycle.ts) */
   timeLapse: boolean;
 }
 

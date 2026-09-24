@@ -207,7 +207,7 @@ export class Menu {
       ),
       h('fieldset', { class: 'group' },
         h('legend', { class: 'group-title', text: 'World' }),
-        this.toggle('Time-lapse: a full day every 15 seconds', 'timeLapse'),
+        this.toggle('Time-lapse: a full day every 20 seconds', 'timeLapse'),
         h('p', { class: 'note', text: 'Runs through dawn, clouds, rain, a thunderstorm and a starry night on repeat. Off keeps the clear spring morning.' }),
       ),
       h('fieldset', { class: 'group' },

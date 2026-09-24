@@ -8,7 +8,10 @@ import { SUN } from '../world/layout';
 import type { GameContext } from './context';
 
 /** real seconds for one full day while the time-lapse is on */
-export const DAY_SECONDS = 15;
+export const DAY_SECONDS = 20;
+/** of those, extra seconds spent in the clear daytime (DAY_HOLD hours), the rest runs at an even pace */
+const DAY_EXTRA = 5;
+const DAY_HOLD: [number, number] = [7, 11];
 /** the authored look: SUN (azimuth 150, elevation 38) falls at this hour on the sun path below */
 export const DEFAULT_HOURS = 8.62;
 /** highest sun elevation of the day (noon), degrees */
@@ -120,7 +123,13 @@ export class DayCycle implements DayState {
   update(dt: number) {
     const f = this.frozen;
     if (f) this.hours = f.hours;
-    else if (this.timeLapse) this.hours = (this.hours + (24 * dt) / DAY_SECONDS) % 24;
+    else if (this.timeLapse) {
+      // an even pace over DAY_SECONDS - DAY_EXTRA, slowed through the clear daytime so it lasts DAY_EXTRA longer
+      const even = 24 / (DAY_SECONDS - DAY_EXTRA), span = DAY_HOLD[1] - DAY_HOLD[0];
+      const inHold = this.hours >= DAY_HOLD[0] && this.hours < DAY_HOLD[1];
+      const rate = inHold ? span / (span / even + DAY_EXTRA) : even;
+      this.hours = (this.hours + rate * dt) % 24;
+    }
     else this.hours = DEFAULT_HOURS;
     sunAt(this.hours, this.sunDir);
     const sy = this.sunDir.y;
