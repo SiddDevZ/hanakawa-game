@@ -118,6 +118,7 @@ export class Site {
       const geo = b.build();
       b.clear();
       if (!geo) continue;
+      geo.userData.releaseCpu = true;
       const [key, small] = k.split('.');
       const mat = (mats as any)[key];
       const mesh = new Mesh(geo, mat);

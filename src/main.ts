@@ -17,6 +17,7 @@ import { DayCycle } from './core/daycycle';
 import { LoadingScreen, yieldFrame } from './ui/loading';
 import { installGzipFetch } from './core/compression';
 import { installPrefetch } from './core/prefetch';
+import { releaseUploaded } from './core/memory';
 import { Streamer } from './core/stream';
 
 type Module = { init(ctx: GameContext): Promise<unknown> | unknown };
@@ -112,7 +113,8 @@ async function boot() {
 
   const resize = () => {
     const w = window.innerWidth, h = window.innerHeight;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, ctx.quality.maxPixelRatio));
+    const budget = Math.sqrt(ctx.quality.maxPixels / Math.max(1, w * h));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, ctx.quality.maxPixelRatio, budget));
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -240,6 +242,10 @@ async function boot() {
   // stamped before app:revealed, whose handlers start the after-reveal downloads
   startup.firstViewMs = startup.firstPlayableMs = Math.round(performance.now());
   events.emit('app:revealed');
+  // merged static geometry keeps a cpu copy until the gpu holds it; sweep now and as late builds land
+  const sweep = () => { const freed = releaseUploaded(ctx); if (freed) console.info(`[luma] released ${Math.round(freed / 1048576)} MB of uploaded geometry`); };
+  sweep();
+  setInterval(sweep, 4000);
   startup.firstPaintMs = Math.round(performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? 0);
   startup.transferredBytes = (performance.getEntriesByType('resource') as PerformanceResourceTiming[])
     .reduce((bytes, entry) => bytes + entry.transferSize, 0);
@@ -276,11 +282,14 @@ async function settleStreaming(ctx: GameContext, maxMs = 2500) {
 }
 
 function warmPipelines(ctx: GameContext) {
-  const saved: [any, boolean, boolean][] = [];
+  const saved: [any, boolean, boolean, number][] = [];
   ctx.scene.traverse((o: any) => {
-    saved.push([o, o.visible, o.frustumCulled]);
+    saved.push([o, o.visible, o.frustumCulled, o.count]);
     o.visible = true;
     o.frustumCulled = false;
+    // one instance builds the same pipeline as all of them; drawing every tree and grass blade into
+    // every pass at once was a multi-second gpu frame, long enough to reset a weaker gpu
+    if (o.isInstancedMesh && o.count > 1) o.count = 1;
   });
   (ctx.services.render as any)?.sun?.refreshAll?.();
   const t0 = performance.now();
@@ -291,9 +300,10 @@ function warmPipelines(ctx: GameContext) {
   } catch (e) {
     console.warn('[luma] pipeline warm-up failed', e);
   }
-  for (const [o, v, f] of saved) {
+  for (const [o, v, f, n] of saved) {
     o.visible = v;
     o.frustumCulled = f;
+    if (o.isInstancedMesh) o.count = n;
   }
   (ctx.services.render as any)?.sun?.refreshAll?.();
   const startup = ctx.services.startup as { warmMs?: number; warmPipelines?: number } | undefined;

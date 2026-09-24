@@ -31,7 +31,7 @@ export async function init(ctx: GameContext) {
   const hNode = heightNode(hTex, hs);
 
   // every layer at 1k in two shared arrays, masks in a third: 5 sampled textures for the whole terrain
-  const layers = await loadLayers(ctx.assets, [...GROUND.map((id) => src(id, '1k')), ...ROCK.map((id) => src(id, '1k'))], 1024, [noiseData(1024, 11)]);
+  const layers = await loadLayers(ctx.assets, [...GROUND.map((id) => src(id, '1k')), ...ROCK.map((id) => src(id, '1k'))], 1024, [noiseData(512, 11)], 512);
   const textures = {
     surface: surfaceTexture(world),
     masks: packMaskArray(world, [['grass', 'pebbles', 'rock', 'trees'], ['sand', 'moss', 'path', 'wet']]),

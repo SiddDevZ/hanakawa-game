@@ -76,7 +76,8 @@ export class Site {
       }
       const bg = geo.build();
       if (!bg) continue;
-      tris += geo.count / 3;
+      tris += bg.attributes.position.count / 3;
+      bg.userData.releaseCpu = true;
       const mesh = new Mesh(bg, mat);
       mesh.name = `${this.name}:${k}`;
       mesh.castShadow = !this.noShadow.has(mk);

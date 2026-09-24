@@ -1,4 +1,5 @@
 import { unpackGzip } from '../core/compression';
+import { dropAfterUpload } from '../core/memory';
 // shipped hemi-octahedral impostors (development fallback can bake them). every tree variant is rendered from N x N view
 // directions over the upper hemisphere into two atlases: albedo (sqrt-encoded rgb, coverage alpha)
 // and tree-space normal. at runtime a far tree is one quad that faces the atlas frame nearest to the
@@ -166,7 +167,7 @@ export async function loadImpostor(record: AtlasRecord, center: Vector3, radius:
   const length = record.size * record.size * 4;
   if (raw.byteLength !== length * 2) throw new Error(`invalid impostor size: ${record.file}`);
   const make = (offset: number) => {
-    const t = new DataTexture(new Uint8Array(raw, offset, length), record.size, record.size, RGBAFormat, UnsignedByteType);
+    const t = dropAfterUpload(new DataTexture(new Uint8Array(raw, offset, length), record.size, record.size, RGBAFormat, UnsignedByteType));
     t.generateMipmaps = true;
     t.minFilter = LinearMipmapLinearFilter;
     t.magFilter = LinearFilter;

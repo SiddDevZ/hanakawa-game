@@ -91,6 +91,12 @@ export class Geo {
     g.setAttribute('aVar', new BufferAttribute(new Float32Array(this.vv), 4));
     g.computeBoundingSphere();
     g.computeBoundingBox();
+    // the js arrays cost ~8x the typed ones and the site keeps its geos: drop them once built
+    this.pos = [];
+    this.nor = [];
+    this.uv = [];
+    this.tint = [];
+    this.vv = [];
     return g;
   }
 }

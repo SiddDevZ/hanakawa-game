@@ -8,6 +8,8 @@ export interface QualityPreset {
   name: QualityName;
   /** cap on devicePixelRatio */
   maxPixelRatio: number;
+  /** cap on rendered pixels (width * height): big high-dpi windows otherwise multiply every full-screen buffer */
+  maxPixels: number;
   shadowMapSize: number;
   shadowCascades: number;
   /** meters covered by the sun shadow cascades */
@@ -33,17 +35,17 @@ export interface QualityPreset {
 
 export const QUALITY: Record<QualityName, QualityPreset> = {
   low: {
-    name: 'low', maxPixelRatio: 1, shadowMapSize: 1024, shadowCascades: 2, shadowDistance: 160,
+    name: 'low', maxPixelRatio: 1, maxPixels: 1.3e6, shadowMapSize: 1024, shadowCascades: 2, shadowDistance: 160,
     reflectionScale: 0.3, waterDetail: 0.6, vegetationDensity: 0.35, grassDistance: 55, terrainDetail: 0.6,
     ao: false, ssgi: false, bloom: false, antialias: 'fxaa', caustics: false, particles: 0.5,
   },
   balanced: {
-    name: 'balanced', maxPixelRatio: 1.25, shadowMapSize: 2048, shadowCascades: 3, shadowDistance: 260,
+    name: 'balanced', maxPixelRatio: 1.25, maxPixels: 2.1e6, shadowMapSize: 2048, shadowCascades: 3, shadowDistance: 260,
     reflectionScale: 0.5, waterDetail: 1, vegetationDensity: 0.65, grassDistance: 85, terrainDetail: 1,
     ao: true, ssgi: false, bloom: true, antialias: 'smaa', caustics: true, particles: 1,
   },
   high: {
-    name: 'high', maxPixelRatio: 2, shadowMapSize: 4096, shadowCascades: 4, shadowDistance: 520,
+    name: 'high', maxPixelRatio: 2, maxPixels: 3.7e6, shadowMapSize: 4096, shadowCascades: 4, shadowDistance: 520,
     reflectionScale: 0.75, waterDetail: 1.4, vegetationDensity: 1, grassDistance: 170, terrainDetail: 1.4,
     ao: true, ssgi: true, bloom: true, antialias: 'traa', caustics: true, particles: 1.4,
   },
@@ -83,7 +85,9 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(KEY);
     if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
   } catch {}
-  return { ...DEFAULT_SETTINGS };
+  // first visit on a small-memory device (chrome reports 4 gb or less): start on low
+  const mem = (navigator as { deviceMemory?: number }).deviceMemory;
+  return { ...DEFAULT_SETTINGS, ...(mem !== undefined && mem <= 4 ? { quality: 'low' as const } : {}) };
 }
 
 export function saveSettings(s: Settings) {

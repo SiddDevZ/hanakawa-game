@@ -2,6 +2,7 @@
 // under the 16 sampled-texture limit (shadow cascades, environment and caustics need slots too):
 //   albedo  (srgb rgba8):   diffuse color
 //   surface (linear rgba8): normal.x, normal.y (opengl convention), roughness, ambient occlusion
+import { dropAfterUpload } from '../core/memory';
 import { DataArrayTexture, LinearFilter, LinearMipmapLinearFilter, RGBAFormat, RepeatWrapping, SRGBColorSpace, NoColorSpace, UnsignedByteType } from 'three/webgpu';
 import type { AssetLoader } from '../core/assets';
 
@@ -26,18 +27,21 @@ async function pixels(url: string, size: number): Promise<Uint8ClampedArray> {
   return g.getImageData(0, 0, size, size).data;
 }
 
-/** extra: raw rgba8 layers appended to the surface array only (e.g. tileable noise) */
-export async function loadLayers(assets: AssetLoader, layers: LayerSource[], size: number, extra: Uint8Array[] = []) {
+/**
+ * extra: raw rgba8 layers appended to the surface array only (e.g. tileable noise).
+ * surfSize: the normal/roughness array's size (the shipped normal maps are 512, so more is wasted memory)
+ */
+export async function loadLayers(assets: AssetLoader, layers: LayerSource[], size: number, extra: Uint8Array[] = [], surfSize = size) {
   const n = layers.length;
   const albedo = new Uint8Array(size * size * 4 * n);
-  const surface = new Uint8Array(size * size * 4 * (n + extra.length));
-  extra.forEach((e, i) => surface.set(e, (n + i) * size * size * 4));
-  const px = size * size;
+  const surface = new Uint8Array(surfSize * surfSize * 4 * (n + extra.length));
+  extra.forEach((e, i) => surface.set(e, (n + i) * surfSize * surfSize * 4));
+  const px = size * size, sp = surfSize * surfSize;
   await Promise.all(layers.map((L, li) => assets.track(`terrain ${L.id}`, (async () => {
-    const [d, nm, arm] = await Promise.all([pixels(L.diffuse, size), pixels(L.normal, size), L.arm ? pixels(L.arm, size) : Promise.resolve(null)]);
-    const o = li * px * 4;
-    albedo.set(d, o);
-    for (let p = 0; p < px; p++) {
+    const [d, nm, arm] = await Promise.all([pixels(L.diffuse, size), pixels(L.normal, surfSize), L.arm ? pixels(L.arm, surfSize) : Promise.resolve(null)]);
+    albedo.set(d, li * px * 4);
+    const o = li * sp * 4;
+    for (let p = 0; p < sp; p++) {
       const q = p * 4;
       surface[o + q] = nm[q];
       surface[o + q + 1] = nm[q + 1];
@@ -45,8 +49,8 @@ export async function loadLayers(assets: AssetLoader, layers: LayerSource[], siz
       surface[o + q + 3] = arm ? arm[q] : 255;
     }
   })(), 2)));
-  const make = (data: Uint8Array, srgb: boolean) => {
-    const t = new DataArrayTexture(data, size, size, data.length / (size * size * 4));
+  const make = (data: Uint8Array, srgb: boolean, size: number) => {
+    const t = dropAfterUpload(new DataArrayTexture(data, size, size, data.length / (size * size * 4)));
     t.format = RGBAFormat;
     t.type = UnsignedByteType;
     t.colorSpace = srgb ? SRGBColorSpace : NoColorSpace;
@@ -59,5 +63,5 @@ export async function loadLayers(assets: AssetLoader, layers: LayerSource[], siz
     t.needsUpdate = true;
     return t;
   };
-  return { albedo: make(albedo, true), surface: make(surface, false), index: Object.fromEntries(layers.map((l, i) => [l.id, i])) as Record<string, number> };
+  return { albedo: make(albedo, true, size), surface: make(surface, false, surfSize), index: Object.fromEntries(layers.map((l, i) => [l.id, i])) as Record<string, number> };
 }

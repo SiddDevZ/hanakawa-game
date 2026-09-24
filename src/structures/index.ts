@@ -5,7 +5,7 @@ import { Vector3, type Mesh, type Object3D } from 'three/webgpu';
 import type { GameContext } from '../core/context';
 import { LANDMARKS, bankPoint, landmarkPoint, riverFrame, riverHeading } from '../world/layout';
 import { SITES, type Site as SiteDef } from '../world/sites';
-import { slicer, trs } from './geom';
+import { slicer, trs, clearPartCache } from './geom';
 import { createMaterials } from './materials';
 import { Site } from './builder';
 import { buildHouse } from './machiya';
@@ -351,7 +351,8 @@ export async function init(ctx: GameContext) {
       },
     }));
   }
-  service.ready = Promise.all([nearReady, ...lateJobs]).then(() => undefined);
+  // every site is built once the late jobs finish; the shared part cache is only needed until then
+  service.ready = Promise.all([nearReady, ...lateJobs]).then(() => clearPartCache());
 
   ctx.onUpdate((c) => {
     const t = c.time.render;
