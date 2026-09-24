@@ -8,6 +8,7 @@ import {
   positionLocal, sin, smoothstep, sqrt, step, texture, transformNormalToView, uniform, uniformArray, uv, varying, vec2, vec3,
 } from 'three/tsl';
 import { uTime } from '../../core/uniforms';
+import { flicker, lampLevel } from '../../structures/night';
 
 type N = any;
 
@@ -255,7 +256,9 @@ export function createMaterials(tex: BoatTextures) {
     col = mix(col, vec3(0.02, 0.018, 0.016), print.a.mul(0.92));
     lantern.colorNode = mix(vec3(0.015, 0.013, 0.012), col, paper);
     const glowCol = mix(vec3(1.0, 0.78, 0.5), vec3(1.0, 0.25, 0.1), u.lanternRed);
-    lantern.emissiveNode = glowCol.mul(u.lanternGlow).mul(paper).mul(oneMinus(ribs.mul(0.5))).mul(oneMinus(print.a.mul(0.9)));
+    // the candle burns brighter from dusk (lampLevel is 0 in the authored day)
+    const glow: N = u.lanternGlow.add(lampLevel.mul(flicker(0.37)).mul(3.2));
+    lantern.emissiveNode = glowCol.mul(glow).mul(paper).mul(oneMinus(ribs.mul(0.5))).mul(oneMinus(print.a.mul(0.9)));
     lantern.roughnessNode = mix(float(0.22), float(0.7), paper);
     lantern.clearcoatNode = oneMinus(paper);
     lantern.clearcoatRoughnessNode = float(0.12);

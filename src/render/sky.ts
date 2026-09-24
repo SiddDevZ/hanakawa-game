@@ -6,7 +6,11 @@ import {
   ClampToEdgeWrapping, DataTexture, DataUtils, EquirectangularReflectionMapping, HalfFloatType, LinearFilter,
   LinearSRGBColorSpace, RepeatWrapping, RGBAFormat, Vector3, type Node,
 } from 'three/webgpu';
-import { Fn, dot, exp, float, max, mix, normalWorldGeometry, normalize, smoothstep, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
+import {
+  Fn, If, dot, exp, float, floor, fract, max, min, mix, normalWorldGeometry, normalize, sin, smoothstep, sqrt, step, texture, uniform,
+  vec2, vec3, vec4,
+} from 'three/tsl';
+import { uMoonDir } from '../core/daycycle';
 import { TUNE } from './config';
 
 export interface SkyData {
@@ -418,11 +422,45 @@ export const azimuthU = Fn(([dir]: [Node]) => {
   return d.z.atan(d.x).mul(1 / TWO_PI).add(0.5);
 });
 
+type U = ReturnType<typeof uniform>;
+
+/** time of day and weather over the photographed sky (driven by daylight.ts). with `active` 0 the
+ *  shader skips all of it and the sky is exactly the authored morning */
+export interface SkyWeather {
+  active: U;
+  /** day sky: saturation, then a multiplier (dims toward dusk, greys under cloud) */
+  sat: U;
+  mul: U;
+  /** additive gradient, horizon and zenith: overcast grey, storm slate, the night sky */
+  addH: U;
+  addZ: U;
+  /** dusk / dawn glow hugging the horizon: toward the sun, and all around */
+  glowSun: U;
+  glowSky: U;
+  /** mie halo around the (moving) sun disc */
+  halo: U;
+  /** 0..1 flattens the photographed sun (it stays at SUN) once the real sun has moved away */
+  photoDim: U;
+  /** multiplier on the photo's clouds (their undersides catch the low sun pink at dawn and dusk) */
+  cloudTint: U;
+  stars: U;
+  moon: U;
+  /** 0..1 how much of the photo's cloud structure a lightning flash lights */
+  flash: U;
+  /** angular size of one pixel (radians): keeps stars and the moon's edge antialiased */
+  pixel: U;
+}
+
 export interface SkyNodes {
   node: Node;
   /** 1 = draw the analytic sun disc (the water reflection pass may want it off) */
-  sunDisc: ReturnType<typeof uniform>;
-  sunDir: ReturnType<typeof uniform>;
+  sunDisc: U;
+  sunDir: U;
+  /** radiance of the analytic sun disc (linear rgb) */
+  sunColor: U;
+  weather: SkyWeather;
+  /** the same time-of-day / weather grade for another sky lookup (e.g. an env-map fallback), no stars */
+  gradeSky: (color: Node, dir: Node) => Node;
   /** the dreamy sky grade (see TUNE.dream) */
   grade: {
     blush: ReturnType<typeof uniform>;
@@ -452,6 +490,25 @@ export function createSkyNode(
   const sc = TUNE.sun.color;
   const uSunColor = uniform(new Vector3(sc[0], sc[1], sc[2]).multiplyScalar(TUNE.sun.discRadiance));
   const cosOuter = Math.cos((0.3 * Math.PI) / 180), cosInner = Math.cos((0.24 * Math.PI) / 180);
+  const W: SkyWeather = {
+    active: uniform(0),
+    sat: uniform(1),
+    mul: uniform(new Vector3(1, 1, 1)),
+    addH: uniform(new Vector3()),
+    addZ: uniform(new Vector3()),
+    glowSun: uniform(new Vector3()),
+    glowSky: uniform(new Vector3()),
+    halo: uniform(new Vector3()),
+    photoDim: uniform(0),
+    cloudTint: uniform(new Vector3(1, 1, 1)),
+    stars: uniform(0),
+    moon: uniform(0),
+    flash: uniform(new Vector3()),
+    pixel: uniform(0.001),
+  };
+  // the photographed sun sits where SUN was when the sky was prepared
+  const photoSun = vec3(sunDir.x, sunDir.y, sunDir.z);
+  const v3 = (u: U) => vec3(u as any);
 
   /** dreamy grade. clouds are the texels with little blue excess above the horizon band: their shaded
    *  side is lifted toward lavender-white, the sunlit side warmed toward cream, so no cloud reads grey */
@@ -471,11 +528,88 @@ export function createSkyNode(
     return max(graded, vec3(0));
   };
 
+  /** photo clouds: little blue excess above the horizon band (they hide stars, catch the flash) */
+  const cloudMask = (raw: any, dir: any) => smoothstep(0.42, 0.12, raw.b.sub(raw.r).div(raw.b.add(0.02))).mul(smoothstep(0.0, 0.08, dir.y));
+
+  /** the shared part of the grade: saturation, dimming, gradient, dusk glow, flash. mirrored on the
+   *  cpu for the haze ring (daylight.ts), so ridges keep fading into the sky behind them */
+  const gradeCore = (c: any, dir: any, clouds: any) => {
+    const up = max(dir.y, float(0));
+    const L = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    const elT = float(1).sub(exp(up.div(-0.28)));
+    const cs = dot(dir, uSunDir as any);
+    const toward = cs.mul(0.5).add(0.5).clamp(0, 1);
+    const band = exp(up.div(-0.12));
+    const glow = v3(W.glowSun).mul(toward.mul(toward).mul(toward)).add(v3(W.glowSky)).mul(band);
+    const flash = v3(W.flash).mul(float(0.45).add(clouds.mul(0.55))).mul(float(0.6).add(elT.mul(0.4)));
+    return (mix(vec3(L), c, W.sat as any) as any).mul(v3(W.mul)).add(mix(v3(W.addH), v3(W.addZ), elT)).add(glow).add(flash);
+  };
+
+  const hash33 = (p: any): any => {
+    const p3 = (fract(p.mul(vec3(0.1031, 0.103, 0.0973))) as any).toVar();
+    p3.addAssign(dot(p3, p3.yxz.add(33.33)));
+    return fract(p3.xxy.add(p3.yxx).mul(p3.zyx));
+  };
+
+  /** fixed stars: one candidate per cell of a 3d grid over the sphere, drawn as a gaussian at least a
+   *  pixel wide (flux kept constant), and only when it sits well inside its cell so none is clipped */
+  const STAR_N = 150;
+  const starField = (dir: any) => {
+    const p = dir.mul(STAR_N);
+    const cell = floor(p) as any;
+    const h = hash33(cell), h2 = hash33(cell.add(19.19));
+    const q = normalize(cell.add(h.mul(0.5).add(0.25))) as any;
+    const qc = q.mul(STAR_N).sub(cell);
+    const inside = step(0.25, min(qc.x, min(qc.y, qc.z))).mul(step(max(qc.x, max(qc.y, qc.z)), 0.75));
+    const d = dir.sub(q).length().mul(STAR_N);
+    const sig = max((W.pixel as any).mul(STAR_N * 1.05), float(0.06));
+    const core = exp(d.div(sig).pow(2).negate()).mul(float(0.06).div(sig).pow(2));
+    const mag = h2.y.pow(9).mul(7).add(h2.y.mul(0.12));
+    const tint = mix(vec3(0.72, 0.84, 1.12), vec3(1.12, 0.96, 0.8), h2.z);
+    return tint.mul(step(0.7, h2.x).mul(inside).mul(mag).mul(core));
+  };
+
+  /** the moon: a pale disc with soft maria and a two-part glow */
+  const moonDisc = (dir: any) => {
+    const m = uMoonDir as any;
+    const cm = dot(dir, m).clamp(-1, 1);
+    const ang = sqrt(max(float(2).sub(cm.mul(2)), float(0)));
+    const R = 0.013;
+    const edge = max(W.pixel as any, float(1e-4));
+    const disc = smoothstep(edge.add(R), edge.negate().add(R), ang);
+    const t = dir.sub(m.mul(cm)).mul(1 / R);
+    const maria = float(0.82).add(sin(t.x.mul(2.3).add(t.y.mul(1.7))).mul(sin(t.z.mul(2.9).sub(t.x.mul(1.1)))).mul(0.12));
+    const limb = float(1).sub(ang.div(R).clamp(0, 1).pow(2).mul(0.25));
+    const glow = exp(ang.div(-0.05)).mul(0.05).add(exp(ang.div(-0.014)).mul(0.22));
+    return vec3(0.93, 0.95, 1.0).mul(disc.mul(maria).mul(limb).mul(1.9)).add(vec3(0.42, 0.52, 0.82).mul(glow));
+  };
+
+  /** the full weather / night grade of the visible sky (above the horizon) */
+  const weatherSky = (c: any, raw: any, dir: any) => {
+    const clouds = cloudMask(raw, dir);
+    // the photographed sun, flattened once the analytic one has left it
+    const near0 = smoothstep(Math.cos((14 * Math.PI) / 180), Math.cos((3 * Math.PI) / 180), dot(dir, photoSun)).mul(W.photoDim as any);
+    const Lr = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    const c0 = c.mul(mix(float(1), min(float(1), float(0.95).div(max(Lr, float(1e-3)))), near0)).mul(mix(vec3(1), v3(W.cloudTint), clouds));
+    const out = gradeCore(c0, dir, clouds).toVar();
+    const cs = dot(dir, uSunDir as any);
+    const up = max(dir.y, float(0));
+    out.addAssign(v3(W.halo).mul(exp(cs.sub(1).mul(260)).add(exp(cs.sub(1).mul(14)).mul(0.12))));
+    const clear = float(1).sub(clouds);
+    out.addAssign((starField(dir) as any).mul(W.stars).mul(clear).mul(smoothstep(0.015, 0.2, up)));
+    out.addAssign((moonDisc(dir) as any).mul(W.moon).mul(float(1).sub(clouds.mul(0.75))));
+    return max(out, vec3(0));
+  };
+
   const node = Fn(() => {
     const dir = normalize(normalWorldGeometry).toVar();
     const uv = vec2(azimuthU(dir), dir.y.clamp(-1, 1).asin().mul(1 / Math.PI).add(0.5));
-    const raw = bgTex.sample(uv).rgb;
-    const sky = D.enabled ? dreamSky(raw, dir) : raw;
+    const raw = bgTex.sample(uv).rgb.toVar();
+    const sky = (D.enabled ? dreamSky(raw, dir) : raw).toVar();
+    // time of day and weather: a uniform branch, skipped entirely in the authored look
+    If((W.active as any).greaterThan(0.5), () => {
+      sky.assign(weatherSky(sky, raw, dir));
+    });
     // the photographed lower hemisphere is a synthetic ground; fade to the haze color instead
     const below = smoothstep(0.003, -0.003, dir.y);
     const col = (mix(sky as any, horizonColor(dir) as any, below) as any).toVar();
@@ -487,7 +621,12 @@ export function createSkyNode(
     const out = skyMist ? (skyMist(col, dir) as any) : col;
     return vec4(max(out, vec3(0)), 1);
   })();
-  return { node, sunDisc: uSunDisc, sunDir: uSunDir, grade };
+  const gradeSky = Fn(([color, dir]: [Node, Node]) => {
+    const d = normalize(dir as any);
+    const graded = gradeCore(color as any, d, float(0.5));
+    return mix(color as any, max(graded, vec3(0)), (W.active as any).greaterThan(0.5).select(float(1), float(0)));
+  });
+  return { node, sunDisc: uSunDisc, sunDir: uSunDir, sunColor: uSunColor, weather: W, gradeSky: (c, d) => gradeSky(c, d), grade };
 }
 
 const SKY_TEXTURES = ['background', 'environment', 'reflection', 'horizon'] as const;

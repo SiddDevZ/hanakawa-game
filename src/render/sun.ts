@@ -58,6 +58,14 @@ export class Sun {
   private last: { pos: Vector3; fwd: Vector3; frame: number }[] = [];
   private cascades = 0;
   private distance = 0;
+  /** the light direction changed since the last shadow refresh (time-lapse): every cascade follows */
+  private moved = false;
+  private turn = 0;
+  private moveFrame = 0;
+  /** while the light moves: an outer cascade refreshes every `outerStride` frames (2 when the light is
+   *  dim and its shadows faint), none at all while `dark` (between sunset and moonrise) */
+  outerStride = 1;
+  dark = false;
 
   constructor(renderer: WebGPURenderer) {
     const c = TUNE.sun.color;
@@ -112,6 +120,16 @@ export class Sun {
     this.last = [];
   }
 
+  /** points the light along a unit direction (toward the light). the authored look never calls this */
+  setDirection(d: Vector3) {
+    if (this.dir.equals(d)) return;
+    // a jump (sun/moon swap, a new frozen hour, back to the authored look) re-renders every cascade
+    if (this.dir.dot(d) < 0.9994) this.refreshAll();
+    this.dir.copy(d);
+    this.light.position.copy(d).multiplyScalar(400);
+    this.moved = true;
+  }
+
   /** per frame: request one shadow render and tune per-cascade bias once the cascades exist */
   update(camera: PerspectiveCamera) {
     const csm = this.csm;
@@ -135,6 +153,24 @@ export class Sun {
     const f = this.frame++;
     const pos = camera.getWorldPosition(_camPos);
     const fwd = camera.getWorldDirection(_camFwd);
+    if (this.moved) {
+      // a moving light (time-lapse) shifts every cascade's matrix. the nearest follows every frame and
+      // the outer ones take turns (one per frame, or every other frame when the light is dim): each
+      // keeps the matrix it was rendered with, so far shadows lag by a few frames and never flicker
+      this.moved = false;
+      if (this.dark && f >= 4) return;
+      const n = lights.length;
+      const outer = n > 1 && this.moveFrame++ % this.outerStride === 0 ? 1 + (this.turn++ % (n - 1)) : 0;
+      for (let i = 0; i < n; i++) {
+        if (i !== 0 && i !== outer && f >= 4) continue;
+        lights[i].shadow.needsUpdate = true;
+        const last = this.last[i] ?? (this.last[i] = { pos: new Vector3(), fwd: new Vector3(), frame: 0 });
+        last.pos.copy(pos);
+        last.fwd.copy(fwd);
+        last.frame = f;
+      }
+      return;
+    }
     // at most one outer cascade re-renders per frame, so refreshes never stack into a frame spike
     let outerDone = false;
     for (let i = 0; i < lights.length; i++) {

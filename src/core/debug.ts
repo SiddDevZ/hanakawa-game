@@ -37,6 +37,12 @@ VIEWS.grotta = VIEWS.falls;
 
 export function installDebug(ctx: GameContext) {
   const held = new Set<Action>();
+  // a camera teleport builds the far pieces around where it lands right away (see core/stream.ts)
+  const forceAt = (pos: number[], target: number[]) => {
+    const stream = ctx.services.stream as { force?(s: number): void } | undefined;
+    stream?.force?.(nearestRiver(pos[0], pos[2]).s);
+    stream?.force?.(nearestRiver(target[0], target[2]).s);
+  };
   const api = {
     ctx,
     views: VIEWS,
@@ -46,14 +52,25 @@ export function installDebug(ctx: GameContext) {
     view(name: string) {
       const v = VIEWS[name];
       if (!v || !ctx.cameraRig) return false;
+      forceAt(v[0], v[1]);
       ctx.cameraRig.setOverride(new Vector3(...v[0]), new Vector3(...v[1]));
       return true;
     },
     look(pos: number[], target: number[]) {
+      forceAt(pos, target);
       ctx.cameraRig?.setOverride(new Vector3(...pos), new Vector3(...target));
     },
     clearView() {
       ctx.cameraRig?.setOverride(null);
+    },
+    /** hold a time of day and weather for tests and screenshots: day(21, 'storm'); day(null) releases */
+    day(hours: number | null, weather: 'clear' | 'cloudy' | 'rain' | 'storm' = 'clear') {
+      (ctx.services.day as { freeze(h: number | null, w?: string): void } | undefined)?.freeze(hours, weather as never);
+    },
+    /** river centerline at along-river s (test scripts fly the camera with it) */
+    river(s: number) {
+      const f = riverFrame(s);
+      return { s: f.s, x: f.x, z: f.z, width: f.width };
     },
     hold(a: Action, on = true) {
       ctx.input.setHeld(a, on);

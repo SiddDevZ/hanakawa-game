@@ -20,6 +20,7 @@ import { Site } from './builder';
 import { Bucket, chamferBox, cylinder, lathe, poly, rng, segment, trs, type Part, type RGB } from './geom';
 import { GLOW_GAIN, GLOW_TINT, type Materials } from './materials';
 import { buildBoat, MooredBoat, type HullSpec } from './boats';
+import { LAMP_GAIN, flicker, lampColor, lampLevel, lampLevelNow } from './night';
 
 type N = any;
 
@@ -58,7 +59,9 @@ export function swayMaterial() {
   m.colorNode = c;
   m.roughnessNode = mix(float(0.9), float(0.82), a.z);
   m.metalnessNode = float(0);
-  m.emissiveNode = c.mul(vec3(...GLOW_TINT)).mul(a.w.mul(GLOW_GAIN)).mul(float(1).sub(rib.mul(0.6)));
+  // lantern paper (paper = 1 with a day glow) burns brighter from dusk, each with its own flicker
+  const night = lampColor(c).mul(a.z.mul(step(0.001, a.w)).mul(lampLevel).mul(flicker(a.y)).mul(LAMP_GAIN));
+  m.emissiveNode = c.mul(vec3(...GLOW_TINT)).mul(a.w.mul(GLOW_GAIN)).add(night).mul(float(1).sub(rib.mul(0.6)));
   return m;
 }
 
@@ -301,7 +304,34 @@ function boatLoad(mats: Materials, kind: number, clothMat: MeshStandardNodeMater
   return g;
 }
 
-export interface NpcBoat { boat: MooredBoat; lane: Lane; figure: Group | null; pole: Group | null }
+export interface NpcBoat { boat: MooredBoat; lane: Lane; figure: Group | null; pole: Group | null; lamp?: Mesh }
+
+/**
+ * a chochin on a short bamboo pole at the bow, in the hull's local frame. it is lit only from dusk
+ * (the mesh is hidden while lampLevel is ~0, so the authored day neither sees nor pays for it)
+ */
+function boatLamp(mats: Materials, h: HullSpec, seed: number) {
+  const b = new Bucket();
+  const R = rng(seed);
+  const z = -h.L / 2 + 0.8, top = 1.85;
+  const dark: RGB = [0.05, 0.035, 0.025];
+  // lantern paper material: aVar = [flicker phase, night lamp, 0, day glow]; the pole never glows
+  b.add(cylinder(0.022, 0.016, top, 6), trs(0, 0.05, z), { col: [0.3, 0.24, 0.12] });
+  const arm = segment([0, top, z + 0.04], [0, top - 0.04, z - 0.42]);
+  b.add(cylinder(0.012, 0.012, arm.len, 5), arm.m, { col: [0.3, 0.24, 0.12] });
+  const s = 0.62, hy = top - 0.06, ly = hy - 0.12;
+  const prof = [[0.09, -0.62], [0.16, -0.58], [0.23, -0.45], [0.25, -0.29], [0.225, -0.1], [0.15, 0.0], [0.085, 0.02]].map(([r, y]) => [r * s, y * s]);
+  const lz = z - 0.4;
+  b.add(cylinder(0.006, 0.006, hy - ly, 4), trs(0, ly, lz), { col: dark });
+  b.add(lathe(prof, 10), trs(0, ly, lz), { col: R() < 0.5 ? RED : PAPER, v: [R(), 1, 0, 0] });
+  for (const cy of [-0.64 * s, 0.0]) b.add(cylinder(0.095 * s, 0.095 * s, 0.05 * s, 8), trs(0, ly + cy, lz), { col: dark });
+  const mesh = new Mesh(b.build()!, mats.paper);
+  mesh.name = 'life:npc-lamp';
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.visible = false;
+  return mesh;
+}
 
 function riverTraffic(ctx: GameContext, mats: Materials, clothMat: MeshStandardNodeMaterial) {
   const lanes: Lane[] = [
@@ -328,9 +358,12 @@ function riverTraffic(ctx: GameContext, mats: Materials, clothMat: MeshStandardN
     const load = boatLoad(mats, loads[i], clothMat, 300 + i);
     load.position.y = -specs[i].draft + 0.12;
     build.group.add(load);
+    const lamp = boatLamp(mats, specs[i], 500 + i);
+    lamp.position.y = -specs[i].draft + 0.12;
+    build.group.add(lamp);
     const boat = new MooredBoat(ctx, build, pose.x, pose.z, pose.yaw);
     boat.build.group.name = 'life:npc-boat';
-    return { boat, lane, figure: null, pole: null };
+    return { boat, lane, figure: null, pole: null, lamp };
   });
   return { boats, pose };
 }
@@ -1123,7 +1156,9 @@ export function createRiverLife(ctx: GameContext, mats: Materials, site: Site) {
     c.camera.getWorldPosition(cam);
     const tr = c.time.render;
     wild.update(c, cam);
+    const lampsLit = lampLevelNow() > 0.02;
     for (const nb of traffic.boats) {
+      if (nb.lamp) nb.lamp.visible = lampsLit;
       lanePose(nb.lane, tr, tpose);
       nb.boat.x = tpose.x; nb.boat.z = tpose.z; nb.boat.yaw = tpose.yaw;
       const g = nb.boat.build.group;

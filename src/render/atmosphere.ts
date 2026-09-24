@@ -27,7 +27,9 @@ export interface MistZone {
 // the horizon ring and zones are uniform arrays rather than textures: every lit material runs
 // this, and fragment texture slots are scarce (webgpu's default limit is 16 per stage)
 export function createAtmosphere(horizonRing: Vector3[], zones: MistZone[]) {
-  const ring = uniformArray(horizonRing, 'vec3');
+  // own copies: time of day and weather regrade the ring on the cpu (daylight.ts), never the sky data
+  const ringBase = horizonRing.map((v) => v.clone());
+  const ring = uniformArray(horizonRing.map((v) => v.clone()), 'vec3');
   const N = horizonRing.length;
   const H = TUNE.haze, M = TUNE.mist;
   const uAerosol = uniform(H.aerosol);
@@ -164,6 +166,9 @@ export function createAtmosphere(horizonRing: Vector3[], zones: MistZone[]) {
 
   return {
     fogNode,
+    /** the haze color ring (64 azimuth bins, uniform array) and its authored values */
+    ring: ring.array as Vector3[],
+    ringBase,
     airTint,
     hazeColor,
     mistColor,

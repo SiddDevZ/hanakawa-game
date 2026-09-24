@@ -13,7 +13,11 @@ import { LAYERS } from './core/layers';
 import { WorldData } from './world/worldData';
 import { setWaveScaleFn } from './world/waves';
 import { updateSharedUniforms } from './core/uniforms';
+import { DayCycle } from './core/daycycle';
 import { LoadingScreen, yieldFrame } from './ui/loading';
+import { installGzipFetch } from './core/compression';
+import { installPrefetch } from './core/prefetch';
+import { Streamer } from './core/stream';
 
 type Module = { init(ctx: GameContext): Promise<unknown> | unknown };
 
@@ -36,6 +40,11 @@ const MODULES: [string, () => Promise<Module>][] = [
 const CRITICAL = new Set(['render', 'terrain', 'water', 'boat', 'camera', 'game', 'ui']);
 /** loading screen phase for each module (camera, game and ui are quick and share one) */
 const PHASE_OF: Record<string, string> = { camera: 'harbor', game: 'harbor', ui: 'harbor' };
+
+// prefetch sits under the gzip unpacking so prefetched .bin/.hdr files are unpacked like any other
+const prefetch = installPrefetch();
+installGzipFetch();
+void prefetch('/preload.json');
 
 const params = new URLSearchParams(location.search);
 const loading = new LoadingScreen();
@@ -124,6 +133,15 @@ async function boot() {
 
   if (world.has('waveScale')) setWaveScaleFn((x, z) => world.sample('waveScale', x, z));
 
+  // time of day and weather advance first; render turns them into the sun, sky and light before the
+  // shared uniforms copy ctx.sun (-100)
+  const day = new DayCycle(ctx);
+  day.timeLapse = settings.timeLapse || params.get('timelapse') === '1';
+  ctx.services.day = day;
+  ctx.onUpdate(() => day.update(ctx.time.frameDt), -120);
+  events.on('settings:change', (patch: Partial<typeof settings>) => {
+    if (patch.timeLapse !== undefined) day.timeLapse = patch.timeLapse;
+  });
   ctx.onUpdate(updateSharedUniforms, -100);
 
   // the loading screen covers everything until the scene is complete and every pipeline is built.
@@ -145,6 +163,9 @@ async function boot() {
   const deferred = MODULES.filter(([n]) => !CRITICAL.has(n));
   for (const [name] of critical) await loadModule(name);
   ctx.services.failedModules = failed;
+  // the boat is moored at its start (the save's dock, or the village) now: the modules below build the
+  // river around it before the reveal and queue the far reaches, which stream in after it
+  ctx.services.stream = new Streamer(ctx);
 
   installDebug(ctx);
 
@@ -154,17 +175,19 @@ async function boot() {
   });
 
   // the warm-up must run inside the animation loop: pass nodes render once per renderer frame, so a
-  // render issued between frames is skipped as a repeat and builds nothing
-  let warmRequest: (() => void) | null = null;
+  // render issued between frames is skipped as a repeat and builds nothing. it runs in steps while the
+  // rest still downloads (the main thread is mostly idle then), so the last one only builds what's new.
+  let warmWaiters: (() => void)[] = [];
+  const requestWarm = () => new Promise<void>((r) => warmWaiters.push(r));
   let drawing = false;
   let lastTick = -Infinity;
   const skipDraw = () => {};
   renderer.setAnimationLoop((t) => {
-    if (warmRequest) {
+    if (warmWaiters.length) {
       warmPipelines(ctx);
-      const done = warmRequest;
-      warmRequest = null;
-      done();
+      const done = warmWaiters;
+      warmWaiters = [];
+      for (const r of done) r();
     } else if (drawing) loop.frame(ctx, t);
     else if (t - lastTick >= 12) {
       // at most ~60 updates a second while hidden, so building keeps most of the main thread
@@ -179,12 +202,18 @@ async function boot() {
     }
   });
 
+  void requestWarm();
   for (const [name] of deferred) await loadModule(name);
+  void requestWarm();
   ctx.services.failedModules = failed;
-  // modules may keep building near-first in the background after init; wait for them to finish
+  // modules may keep building near-first in the background after init; wait for the part around the
+  // start (`nearReady`, else all of it: `ready`). the far reaches stream in after the reveal
   await loading.phase('background');
   const pending = Object.values(ctx.services)
-    .map((sv) => (sv as { ready?: Promise<unknown> } | null)?.ready)
+    .map((sv) => {
+      const m = sv as { nearReady?: Promise<unknown>; ready?: Promise<unknown> } | null;
+      return m?.nearReady ?? m?.ready;
+    })
     .filter((p): p is Promise<unknown> => !!p && typeof (p as Promise<unknown>).then === 'function');
   await Promise.all(pending.map((p) => p.catch((e) => console.error('[luma] background build failed', e))));
   markPhase('background');
@@ -199,7 +228,7 @@ async function boot() {
   // pipeline warm-up: one frame with every object visible and unculled builds every shader pipeline
   // (main, mirror and shadow passes) up front, so nothing compiles mid-voyage (first sightings used
   // to stall a frame for ~120 ms)
-  await new Promise<void>((r) => (warmRequest = r));
+  await requestWarm();
   markPhase('warm');
   // a few real frames behind the veil so the first one anybody sees is settled, while the boat arrives
   drawing = true;
@@ -208,8 +237,9 @@ async function boot() {
   markPhase('firstFrame');
 
   await loading.reveal();
-  events.emit('app:revealed');
+  // stamped before app:revealed, whose handlers start the after-reveal downloads
   startup.firstViewMs = startup.firstPlayableMs = Math.round(performance.now());
+  events.emit('app:revealed');
   startup.firstPaintMs = Math.round(performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? 0);
   startup.transferredBytes = (performance.getEntriesByType('resource') as PerformanceResourceTiming[])
     .reduce((bytes, entry) => bytes + entry.transferSize, 0);
@@ -268,8 +298,10 @@ function warmPipelines(ctx: GameContext) {
   (ctx.services.render as any)?.sun?.refreshAll?.();
   const startup = ctx.services.startup as { warmMs?: number; warmPipelines?: number } | undefined;
   if (startup) {
+    // the last step's cost; earlier steps overlap the downloads
     startup.warmMs = Math.round(performance.now() - t0);
     startup.warmPipelines = pipes() - p0;
+    (startup as { warmSteps?: number[] }).warmSteps = [...((startup as { warmSteps?: number[] }).warmSteps ?? []), startup.warmMs];
   }
 }
 

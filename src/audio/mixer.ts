@@ -1,4 +1,5 @@
-// bus structure. voices -> layer bus (wind, river, falls, hull, birds, village, temple) -> ambience / engine / ui
+// bus structure. voices -> layer bus (wind, river, falls, hull, birds, village, temple, plus rain, thunder
+// and night created on demand by ./weather) -> ambience / engine / ui
 // (user volumes) -> world duck (pause) -> master (user volume) -> soft limiter -> gate (tab hidden,
 // fade-in) -> destination. every bus has an analyser so the harness can read levels.
 import type { Settings } from '../core/settings';
@@ -24,6 +25,7 @@ export class Mixer {
   readonly worldVerb: GainNode;
   readonly uiVerb: GainNode;
   private duck: GainNode;
+  private extra = new Map<string, GainNode>();
   private analysers = new Map<string, AnalyserNode>();
   private scratch = new Float32Array(2048);
   private ducked = false;
@@ -75,6 +77,18 @@ export class Mixer {
     this.tap('ambience', this.ambience);
     this.tap('ui', this.ui);
     for (const [k, g] of Object.entries(this.layers)) this.tap(k, g);
+  }
+
+  /** a layer bus created on first use (weather), into ambience like the fixed ones, with its own analyser */
+  layer(name: string): GainNode {
+    let g = this.extra.get(name);
+    if (!g) {
+      g = gain(this.ac, 1);
+      g.connect(this.ambience);
+      this.extra.set(name, g);
+      this.tap(name, g);
+    }
+    return g;
   }
 
   private tap(name: string, node: AudioNode) {

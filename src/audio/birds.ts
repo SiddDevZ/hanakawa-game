@@ -3,6 +3,7 @@
 // warbler (uguisu) repeats its "hoo-hokekyo" a few times, a tit or a wren sings once or twice.
 // bouts are sparse and at most two overlap. far up the valley sides a cuckoo calls its two soft
 // notes now and then (synthesized: the call is nearly a pure tone). distance darkens and echoes.
+// `activity` (set by ./weather) thins the bouts out at night and in the rain.
 import type { GameContext } from '../core/context';
 import { RIVER_LENGTH, bankPoint } from '../world/layout';
 import type { AudioEnv } from './env';
@@ -31,6 +32,8 @@ export class Birds {
   private nextCuckoo: number;
   calls = 0;
   cuckoos = 0;
+  /** 0..1 how lively the birds are: 1 in fair daylight, falling at night and in the rain */
+  activity = 1;
 
   constructor(private env: AudioEnv, private ctx: GameContext) {
     const t = env.ac.currentTime;
@@ -63,7 +66,7 @@ export class Birds {
     if (t > this.nextBout) {
       this.nextBout = t + rand(9, 22);
       const avail = SPECIES.filter((s) => samples.birds[s.id].length);
-      if (avail.length && this.bouts.length < 2) {
+      if (avail.length && this.bouts.length < 2 && (this.activity >= 1 || Math.random() < this.activity)) {
         let r = Math.random() * avail.reduce((a, s) => a + s.weight, 0);
         let sp = avail[0];
         for (const s of avail) if ((r -= s.weight) <= 0) { sp = s; break; }
@@ -82,7 +85,7 @@ export class Birds {
     if (t > this.nextCuckoo) {
       this.nextCuckoo = t + rand(55, 140);
       const p = this.perch([120, 320], [50, 140], [15, 35], 140, 420);
-      if (p) this.cuckoo(t + 0.1, p);
+      if (p && (this.activity >= 1 || Math.random() < this.activity)) this.cuckoo(t + 0.1, p);
     }
   }
 

@@ -2,8 +2,10 @@
 // a fast random flutter, riding slow gusts) and, in the gorge, bamboo on both banks: a papery
 // rustle plus the odd hollow knock of stems touching when a gust comes through. it follows the
 // shared wind strength (same field that moves grass and leaves), rises a little with boat speed
-// and camera height. writes env.gust for the chimes.
+// and camera height. writes env.gust for the chimes. in a thunderstorm (ctx.services.day.storm) the gusts
+// come harder and faster and the low body and leaves swell with them (./weather adds a howl).
 import type { GameContext } from '../core/context';
+import type { DayState } from '../core/daycycle';
 import { uWindStrength } from '../core/uniforms';
 import { bankPoint } from '../world/layout';
 import type { AudioEnv } from './env';
@@ -69,12 +71,13 @@ export class Wind {
     const { ac, site } = this.env;
     const t = ac.currentTime;
     const now = ctx.time.real;
+    const storm = clamp((ctx.services.day as DayState | undefined)?.storm ?? 0);
     if (now > this.nextGust) {
-      // gusts: mostly gentle swells, occasionally a fuller one
-      this.gustTarget = Math.random() < 0.15 ? rand(1.05, 1.3) : rand(0.55, 1);
-      this.nextGust = now + rand(2.5, 7);
+      // gusts: mostly gentle swells, occasionally a fuller one; a storm gusts harder and more often
+      this.gustTarget = Math.random() < 0.15 + 0.25 * storm ? rand(1.05, 1.3 + 0.5 * storm) : rand(0.55 + 0.2 * storm, 1 + 0.3 * storm);
+      this.nextGust = now + rand(2.5, 7) * (1 - 0.55 * storm);
     }
-    this.env.gust += (this.gustTarget - this.env.gust) * (1 - Math.exp(-dt / 1.8));
+    this.env.gust += (this.gustTarget - this.env.gust) * (1 - Math.exp(-dt / (1.8 * (1 - 0.5 * storm))));
     const gust = this.env.gust;
 
     const strength = clamp(Number((uWindStrength as any).value) || 0.45);
@@ -83,11 +86,11 @@ export class Wind {
     const height = smoothstep(4, 90, this.env.listener.y);
     const base = 0.35 + 0.65 * strength;
     // the valley is sheltered: the low body stays small unless the camera climbs
-    const low = 0.03 * base * gust + 0.06 * apparent + 0.06 * height * gust;
-    const leaves = (0.07 + 0.12 * strength) * gust * gust * site.trees * (1 - 0.5 * height) / (1 + site.toWater / 60);
+    const low = 0.03 * base * gust + 0.06 * apparent + 0.06 * height * gust + 0.1 * storm * gust * gust;
+    const leaves = (0.07 + 0.12 * strength) * gust * gust * site.trees * (1 - 0.5 * height) / (1 + site.toWater / 60) * (1 + 1.8 * storm);
     this.level = low + leaves;
     glide(this.low.gain, low, t, 0.3);
-    glide(this.lowLp.frequency, 240 + 140 * gust + 180 * apparent, t, 0.4);
+    glide(this.lowLp.frequency, 240 + 140 * gust + 180 * apparent + 260 * storm, t, 0.4);
     glide(this.leaves.gain, leaves, t, 0.35);
     glide(this.leavesBp.frequency, 3000 + 1400 * gust, t, 0.6);
 

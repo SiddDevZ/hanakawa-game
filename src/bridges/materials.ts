@@ -11,6 +11,7 @@ import {
 import type { GameContext } from '../core/context';
 import { uSunDir } from '../core/uniforms';
 import { causticsNode } from '../water/caustics';
+import { LAMP_GAIN, flicker, lampColor, lampLevel } from '../structures/night';
 
 // tsl graphs are loosely typed here; @types/three generics do not model mixed swizzles well
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -70,17 +71,39 @@ export interface BridgeMats {
   lacquer: MeshStandardNodeMaterial;
   timber: MeshStandardNodeMaterial;
   stone: MeshStandardNodeMaterial;
-  roof: MeshStandardNodeMaterial;
+  /** null until the covered bridge needs it */
+  roof: MeshStandardNodeMaterial | null;
   bronze: MeshStandardNodeMaterial;
   paper: MeshStandardNodeMaterial;
   plain: MeshStandardNodeMaterial;
 }
 
+/** the shingle roof only the covered bridge uses: its textures load when that bridge is built */
+export async function createRoofMaterial(ctx: GameContext) {
+  const shingle = await loadSet(ctx, 'grey_roof_01', '1k', 4.0, 0.0973);
+  const roof = new MeshStandardNodeMaterial();
+  const uvS = uv().div(shingle.size);
+  const tex = texture(shingle.map, uvS).rgb;
+  const arm = texture(shingle.arm, uvS);
+  const ratio = clamp(luminance(tex).div(shingle.avgL), 0.2, 2.4);
+  let a: Node = aTint.mul(ratio);
+  a = a.mul(macro(0.18));
+  const mN = mx_noise_float(positionWorld.mul(0.9));
+  const moss = smoothstep(0.25, 0.7, mN).mul(0.55).mul(aVar.z);
+  a = mix(a, vec3(0.05, 0.068, 0.024), moss);
+  roof.colorNode = a;
+  roof.roughnessNode = clamp(arm.g.mul(0.3).add(0.62), 0.5, 0.98);
+  roof.metalnessNode = float(0);
+  roof.aoNode = arm.r;
+  roof.normalNode = normalMap(texture(shingle.nor, uvS), vec2(1.2));
+  return roof;
+}
+
+/** every bridge material but the shingle roof, which starts null (see createRoofMaterial) */
 export async function createMaterials(ctx: GameContext): Promise<BridgeMats> {
-  const [wood, rock, shingle] = await Promise.all([
+  const [wood, rock] = await Promise.all([
     loadSet(ctx, 'rough_wood', '2k', 0.62, 0.1273),
     loadSet(ctx, 'rock_boulder_dry', '2k', 1.6, 0.3432),
-    loadSet(ctx, 'grey_roof_01', '1k', 4.0, 0.0973),
   ]);
   const caustics = ctx.quality.caustics;
 
@@ -170,25 +193,6 @@ export async function createMaterials(ctx: GameContext): Promise<BridgeMats> {
     stone.normalNode = normalMap(texture(rock.nor, uvS), vec2(mix(float(1.25), float(0.5), moss)));
   }
 
-  // ---- shingle roof (covered bridge) ----
-  const roof = new MeshStandardNodeMaterial();
-  {
-    const uvS = uv().div(shingle.size);
-    const tex = texture(shingle.map, uvS).rgb;
-    const arm = texture(shingle.arm, uvS);
-    const ratio = clamp(luminance(tex).div(shingle.avgL), 0.2, 2.4);
-    let a: Node = aTint.mul(ratio);
-    a = a.mul(macro(0.18));
-    const mN = mx_noise_float(positionWorld.mul(0.9));
-    const moss = smoothstep(0.25, 0.7, mN).mul(0.55).mul(aVar.z);
-    a = mix(a, vec3(0.05, 0.068, 0.024), moss);
-    roof.colorNode = a;
-    roof.roughnessNode = clamp(arm.g.mul(0.3).add(0.62), 0.5, 0.98);
-    roof.metalnessNode = float(0);
-    roof.aoNode = arm.r;
-    roof.normalNode = normalMap(texture(shingle.nor, uvS), vec2(1.2));
-  }
-
   // ---- old bronze (giboshi finials): dark metal with verdigris running down ----
   const bronze = new MeshStandardNodeMaterial();
   {
@@ -209,7 +213,9 @@ export async function createMaterials(ctx: GameContext): Promise<BridgeMats> {
     paper.roughnessNode = float(0.88);
     paper.metalnessNode = float(0);
     const back = max(dot(normalWorld, uSunDir).negate(), 0);
-    paper.emissiveNode = base.mul(back.mul(0.5).add(0.12)).mul(float(1).sub(rib.mul(0.6)));
+    // lit from inside at night, each lantern flickering on its own part seed (aVar.y)
+    const night = lampColor(base).mul(lampLevel.mul(flicker(aVar.y)).mul(LAMP_GAIN));
+    paper.emissiveNode = base.mul(back.mul(0.5).add(0.12)).add(night).mul(float(1).sub(rib.mul(0.6)));
     paper.side = DoubleSide;
   }
 
@@ -219,5 +225,5 @@ export async function createMaterials(ctx: GameContext): Promise<BridgeMats> {
   plain.roughnessNode = aVar.x;
   plain.metalnessNode = aVar.z;
 
-  return { lacquer, timber, stone, roof, bronze, paper, plain };
+  return { lacquer, timber, stone, roof: null, bronze, paper, plain };
 }

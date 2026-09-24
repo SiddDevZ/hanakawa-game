@@ -3,7 +3,7 @@
 import type { Matrix4 } from 'three/webgpu';
 import { chamferBox, cylinder, lathe, rng, trs, type RGB } from './geom';
 import { COL } from './materials';
-import type { Site } from './builder';
+import { placeHash, type Site } from './builder';
 import { roof } from './roofs';
 
 type At = (x: number, y: number, z: number, yaw?: number, pitch?: number, roll?: number) => Matrix4;
@@ -55,9 +55,10 @@ export function toro(site: Site, m: Matrix4, h = 2.0) {
   const k = h / 2.0;
   site.add('dressed', chamferBox(0.62 * k, 0.16 * k, 0.62 * k, 0.03), at(0, 0.08 * k, 0), {});
   site.add('dressed', lathe([[0.26 * k, 0.16 * k], [0.18 * k, 0.24 * k], [0.13 * k, 0.3 * k], [0.12 * k, 0.9 * k], [0.14 * k, 0.96 * k], [0.3 * k, 1.02 * k], [0.3 * k, 1.1 * k], [0.001, 1.1 * k]], 8, false, 0.2), at(0, 0, 0, Math.PI / 8), {});
-  // firebox with dark openings
+  // firebox with dark openings that burn at night (aVar.y marks the fire, aVar.x its flicker phase)
   site.add('dressed', chamferBox(0.36 * k, 0.34 * k, 0.36 * k, 0.02), at(0, 1.27 * k, 0), {});
-  for (let s = 0; s < 2; s++) site.add('dark', chamferBox(0.2 * k, 0.2 * k, 0.37 * k, 0), at(0, 1.28 * k, 0, (s * Math.PI) / 2), { col: [0.02, 0.018, 0.015] }, true);
+  const fire = placeHash(m);
+  for (let s = 0; s < 2; s++) site.add('dark', chamferBox(0.2 * k, 0.2 * k, 0.37 * k, 0), at(0, 1.28 * k, 0, (s * Math.PI) / 2), { col: [0.02, 0.018, 0.015], v: [fire, 1, 0, 0] }, true);
   // roof: six-sided cap with upturned corners
   site.add('dressed', lathe([[0.001, 1.44 * k], [0.5 * k, 1.44 * k], [0.52 * k, 1.5 * k], [0.3 * k, 1.64 * k], [0.12 * k, 1.72 * k], [0.001, 1.74 * k]], 6, false, 0.3), at(0, 0, 0), {});
   site.add('dressed', lathe([[0.001, 1.72 * k], [0.09 * k, 1.74 * k], [0.1 * k, 1.84 * k], [0.05 * k, 1.95 * k], [0.001, 2.0 * k]], 8, true, 0.1), at(0, 0, 0), {});

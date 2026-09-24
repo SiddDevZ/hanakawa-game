@@ -19,6 +19,7 @@ import { createFrontageDecor } from './decor';
 import { createRiverLife } from './life';
 import { buildCastle, buildHillShrine } from './landmarks';
 import { buildTown, createCritters, type TownService } from './town';
+import type { Slice, Streamer } from '../core/stream';
 
 export interface StructuresService {
   sites: SiteDef[];
@@ -27,10 +28,15 @@ export interface StructuresService {
   pagodaTop: Vector3 | null;
   colliders: number;
   debug: Record<string, unknown>;
-  /** resolves once the instanced prop models are in (main.ts waits for it before play) */
+  /** resolves once the reach around the start is in, prop models included (main.ts waits for it) */
+  nearReady: Promise<void>;
+  /** resolves once the far pieces have streamed in too (after the reveal) */
   ready: Promise<void>;
   stats(): { meshes: number; triangles: number; boats: number; colliders: number };
 }
+
+/** the lake and mill sites cull at this camera distance (see the update below) */
+const CULL_FAR = 700;
 
 /** three.js yaw so local +z faces the river from a bank at along-river s */
 function facingRiver(s: number, side: -1 | 1) {
@@ -58,7 +64,15 @@ export async function init(ctx: GameContext) {
   const millSite = new Site(ctx, 'mill');
   // distant heroes (castle keep, hillside shrine and its torii path): one site, a few merged draws
   const landmarks = new Site(ctx, 'landmarks');
-  const sites = [villageA, villageB, temple, lake, millSite, landmarks];
+  // near-first: the teahouse and the mill are built after the reveal (ctx.services.stream) unless they can
+  // be seen from the river around the start (a save that resumes at their docks). the town, temple and
+  // landmarks are always built first: the town's decor, life and critters are woven through them
+  const stream = ctx.services.stream as Streamer | undefined;
+  const isLate = (x: number, z: number) => !!stream && !stream.seen(x, z, 9, CULL_FAR, 20);
+  const lateJobs: Promise<void>[] = [];
+  let lateTeahouse: (() => void) | null = null;
+  let lateMill = false;
+  const sites = [villageA, villageB, temple, landmarks];
   let buildings = 0;
   const debug: Record<string, unknown> = {};
   let pagodaTop: Vector3 | null = null;
@@ -120,7 +134,12 @@ export async function init(ctx: GameContext) {
       const p = landmarkPoint(l);
       // the teahouse faces the open lake: its +z points away from the bank
       const tyaw = facingRiver(l.s, (l.side || 1) as -1 | 1);
-      safe('teahouse', () => buildTeahouse(lake, world, { x: p.x, z: p.z, y: 0, yaw: tyaw }, Math.max(1, -l.offset - 3.5)));
+      const build = () => safe('teahouse', () => buildTeahouse(lake, world, { x: p.x, z: p.z, y: 0, yaw: tyaw }, Math.max(1, -l.offset - 3.5)));
+      if (isLate(p.x, p.z)) lateTeahouse = build;
+      else {
+        build();
+        sites.push(lake);
+      }
       buildings++;
     } else if (kind === 'castle') {
       safe('castle', () => { debug.castle = buildCastle(landmarks, { x: sd.x, z: sd.z, y: sd.y, yaw }); });
@@ -134,6 +153,8 @@ export async function init(ctx: GameContext) {
     } else if (kind === 'mill') {
       // the wheel needs the materials: built once they are in
       mills.push(sd);
+      if (isLate(sd.x, sd.z)) lateMill = true;
+      else sites.push(millSite);
       buildings++;
     }
   }
@@ -157,15 +178,18 @@ export async function init(ctx: GameContext) {
   const mats = await matsP;
   tc = performance.now();
   const waitMats = tc - tMats;
-  for (const sd of mills) {
-    safe('mill', () => {
-      const toEdge = bankPoint(sd.s!, sd.side!, 0);
-      const dist = Math.hypot(toEdge.x - sd.x, toEdge.z - sd.z);
-      const r = buildMill(millSite, mats, { x: sd.x, z: sd.z, y: sd.y, yaw: facingRiver(sd.s!, sd.side!) }, dist);
-      ctx.scene.add(r.wheel);
-      millWheel = r.wheel;
-    });
-  }
+  const buildMills = () => {
+    for (const sd of mills) {
+      safe('mill', () => {
+        const toEdge = bankPoint(sd.s!, sd.side!, 0);
+        const dist = Math.hypot(toEdge.x - sd.x, toEdge.z - sd.z);
+        const r = buildMill(millSite, mats, { x: sd.x, z: sd.z, y: sd.y, yaw: facingRiver(sd.s!, sd.side!) }, dist);
+        ctx.scene.add(r.wheel);
+        millWheel = r.wheel;
+      });
+    }
+  };
+  if (!lateMill) buildMills();
 
   // water torii standing in the shallows, its gate facing across the river
   safe('water torii', () => {
@@ -244,8 +268,8 @@ export async function init(ctx: GameContext) {
   }
   for (const s of sites) await s.finish(mats, pause);
   mark('finish');
-  // the prop models may still be decoding: add them in the background, main.ts waits on `ready`
-  const ready = instanceProps(ctx, sites).then(() => undefined, (e) => console.error('[structures] props failed', e));
+  // the prop models may still be decoding: add them in the background, main.ts waits on `nearReady`
+  const nearReady = instanceProps(ctx, sites).then(() => undefined, (e) => console.error('[structures] props failed', e));
   debug.phase = phase;
   const ropes = new RopeSet(mats, Math.max(1, links.length));
   ctx.scene.add(ropes.mesh);
@@ -257,7 +281,8 @@ export async function init(ctx: GameContext) {
     pagodaTop,
     colliders,
     debug,
-    ready,
+    nearReady,
+    ready: nearReady,
     stats() {
       let meshes = 0, triangles = 0;
       ctx.scene.traverse((o: Object3D) => {
@@ -282,7 +307,7 @@ export async function init(ctx: GameContext) {
 
   // distance culling: whole sites only, far away. small clutter is merged per site and stays on (it is
   // kept out of the mirror and shadow passes instead), so nothing pops in or out near the player
-  const centers = sites.map((s) => {
+  const centerOf = (s: Site) => {
     const c = new Vector3();
     let n = 0;
     s.group.traverse((o) => {
@@ -290,7 +315,43 @@ export async function init(ctx: GameContext) {
       if (m.isMesh && m.geometry.boundingSphere) { c.add(m.geometry.boundingSphere.center); n++; }
     });
     return n ? c.divideScalar(n) : c;
-  });
+  };
+  const centers = sites.map(centerOf);
+
+  // the far pieces, after the reveal: build, merge, warm their pipelines out of sight, then join the
+  // distance culling (they are farther from the start than CULL_FAR, so they arrive hidden)
+  const addLate = async (site: Site, slice: Slice, extra: Object3D[] = []) => {
+    await site.finish(mats, slice);
+    await slice.wait(stream!.warm(site.group, ctx.scene, () => {
+      sites.push(site);
+      centers.push(centerOf(site));
+    }));
+    for (const o of extra) await slice.wait(stream!.warm(o, ctx.scene));
+    // instanceProps adds its group to the scene as it returns; it goes straight to the warm-up
+    if (site.props.length) {
+      const props = await slice.wait(instanceProps(ctx, [site]));
+      await slice.wait(stream!.warm(props, ctx.scene));
+    }
+  };
+  if (lateTeahouse) {
+    const l = LANDMARKS.find((m) => m.id === 'teahouse')!;
+    const build = lateTeahouse as () => void;
+    lateJobs.push(stream!.add({ label: 'teahouse', s: l.s, run: async (slice) => { build(); await slice(); await addLate(lake, slice); } }));
+  }
+  if (lateMill) {
+    const sd = mills[0];
+    lateJobs.push(stream!.add({
+      label: 'mill', s: sd.s!,
+      run: async (slice) => {
+        buildMills();
+        // the wheel waits for the warm-up with the rest of the mill
+        millWheel?.removeFromParent();
+        await slice();
+        await addLate(millSite, slice, millWheel ? [millWheel] : []);
+      },
+    }));
+  }
+  service.ready = Promise.all([nearReady, ...lateJobs]).then(() => undefined);
 
   ctx.onUpdate((c) => {
     const t = c.time.render;

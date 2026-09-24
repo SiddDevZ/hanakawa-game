@@ -19,6 +19,28 @@ export type MatKey =
 const NO_CAST = new Set(['shoji', 'paper', 'water', 'gravel', 'plain', 'rope', 'linen', 'koshi', 'namako']);
 const NO_MIRROR = new Set(['foliage', 'water', 'gravel', 'plain', 'rope', 'linen']);
 
+/** a stable 0..1 hash of a part's placement (its matrix translation) */
+export function placeHash(m: Matrix4) {
+  const e = m.elements;
+  const h = Math.sin(e[12] * 12.9898 + e[13] * 4.1414 + e[14] * 78.233) * 43758.5453;
+  return h - Math.floor(h);
+}
+
+/**
+ * night lamp seeds: lantern paper gets a flicker phase (aVar.x) and, when it glows by day, the night
+ * lamp flag (aVar.y); shoji and lattice panels get a per-window hash (aVar.w) that decides whether
+ * and when their room lights up. none of these channels were read before, so the day look is unchanged
+ */
+function nightSeed(mat: MatKey, m: Matrix4, o: PartOpts = {}): PartOpts {
+  const v: [number, number, number, number] = o.v ? [o.v[0], o.v[1], o.v[2], o.v[3]] : [0, 0, 0, 0];
+  const h = placeHash(m);
+  if (mat === 'paper') {
+    if (!v[0]) v[0] = h;
+    if (!v[1] && v[3] > 0) v[1] = 1;
+  } else if (!v[3]) v[3] = Math.max(h, 1e-3);
+  return { ...o, v };
+}
+
 /** props placed as instances of loaded gltf models */
 export type PropKind = 'basket' | 'bucket';
 
@@ -57,6 +79,7 @@ export class Site {
   }
 
   add(mat: MatKey, part: Part, m: Matrix4, o?: PartOpts, small = false) {
+    if (mat === 'paper' || mat === 'shoji' || mat === 'koshi') o = nightSeed(mat, m, o);
     this.bucket(mat, small).add(part, m, o);
   }
 

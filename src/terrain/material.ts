@@ -6,6 +6,7 @@ import {
   abs, cameraViewMatrix, clamp, dot, float, int, max, mix as mixT, normalize, normalWorldGeometry, positionWorld, pow, smoothstep, sqrt, texture, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { causticsNode } from '../water/caustics';
+import { uWet } from '../core/daycycle';
 import { vegetationFieldNode, vegetationGroundAlbedo } from '../vegetation/palette';
 
 type N = any;
@@ -146,7 +147,7 @@ export function createTerrainMaterial(t: TerrainTextures, position: N) {
   alb = mix(alb, vegetationGroundAlbedo(p) as N, vegK);
 
   // wet banks: darker, glossier just above the waterline
-  const wetK: N = max(smoothstep(0.45, 0.02, p.y).mul(land), wet.mul(0.6)).mul(float(1).sub(rw.mul(0.3)));
+  const wetK: N = max(max(smoothstep(0.45, 0.02, p.y).mul(land), wet.mul(0.6)), uWet.mul(0.7).mul(land)).mul(float(1).sub(rw.mul(0.3)));
   alb = mix(alb, alb.mul(terrainTuning.uWetDark), wetK);
   rough = mix(rough, rough.mul(0.35), wetK);
   // the river bed: saturated and darker (always wet), sunlit caustics in the shallows

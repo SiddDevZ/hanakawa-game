@@ -1,5 +1,5 @@
 // the few recorded sounds (public domain / cc0, see public/assets/audio/*/provenance.json). files
-// are fetched at init (no AudioContext needed) and decoded once audio starts. every layer that
+// are fetched once the valley is revealed (no AudioContext needed) and decoded once audio starts. every layer that
 // uses a recording also works without it, so a failed download only removes that texture.
 import { makeLoop } from './dsp';
 
@@ -29,6 +29,7 @@ export class Samples {
   private listeners: (() => void)[] = [];
 
   prefetch() {
+    if (this.raw.size) return;
     for (const f of [...Object.values(BIRD_FILES).flat(), ...Object.values(LOOPS)]) {
       this.raw.set(
         f,
@@ -49,6 +50,7 @@ export class Samples {
   }
 
   private async decode(ac: BaseAudioContext, f: string): Promise<AudioBuffer | null> {
+    this.prefetch();
     const data = await this.raw.get(f);
     if (!data) return null;
     try {

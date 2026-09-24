@@ -1,4 +1,4 @@
-import { unpackGzip } from '../core/compression';
+import { unGrad16, unpackGzip } from '../core/compression';
 // baked world data loader. the bake (tools/bake/) writes public/world/world.json plus one binary
 // per channel. every channel is a square grid covering [-size/2, size/2] in x and z,
 // row-major with row index along +z (row 0 = north edge, z = -size/2), column along +x.
@@ -20,6 +20,8 @@ export interface ChannelMeta {
   max: number;
   /** gpu upload: 'half' (R16F, decoded meters) or 'unorm' (R8, decode in shader). default by format */
   gpu?: 'half' | 'unorm' | 'float';
+  /** compressed file only: 'grad16' = u16 residuals of a left + up - upleft predictor, split into lo/hi byte planes */
+  filter?: 'grad16';
 }
 
 export interface WorldMeta {
@@ -57,6 +59,7 @@ export class WorldData {
           try {
             const packed = await assets.binary(base + meta.compressedFile + suffix);
             buf = await unpackGzip(packed);
+            if (meta.filter === 'grad16') buf = unGrad16(buf, meta.res);
           } catch {
             buf = await assets.binary(base + meta.file + suffix);
           }

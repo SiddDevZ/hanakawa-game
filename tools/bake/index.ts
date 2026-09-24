@@ -175,18 +175,34 @@ function fnv(buf: Buffer, hsh: number) {
   return hsh >>> 0;
 }
 mkdirSync(OUT, { recursive: true });
-const channels: Record<string, { file: string; compressedFile: string; res: number; format: string; min: number; max: number }> = {};
+const channels: Record<string, { file: string; compressedFile: string; res: number; format: string; min: number; max: number; filter?: 'grad16' }> = {};
+/** u16 grids: residuals of a left + up - upleft predictor as lo/hi byte planes (gzips ~2.4x smaller); see unGrad16 */
+const grad16 = (buf: Uint8Array, res: number) => {
+  const a = new Uint16Array(buf.buffer, buf.byteOffset, res * res);
+  const n = res * res;
+  const out = new Uint8Array(n * 2);
+  for (let y = 0, i = 0; y < res; y++) {
+    for (let x = 0; x < res; x++, i++) {
+      const l = x > 0 ? a[i - 1] : 0, u = y > 0 ? a[i - res] : 0, ul = x > 0 && y > 0 ? a[i - res - 1] : 0;
+      const d = (a[i] - l - u + ul) & 0xffff;
+      out[i] = d & 0xff;
+      out[n + i] = d >> 8;
+    }
+  }
+  return out;
+};
 let digest = 2166136261;
 const written = new Set<string>(['world.json']);
 const put = (name: string, data: Float32Array, res: number, min: number, max: number, bits: 8 | 16) => {
   const file = name.toLowerCase() + '.bin';
   const buf = quant(data, min, max, bits);
+  const packed = bits === 16 ? name.toLowerCase() + '.g16.gz' : file + '.gz';
   writeFileSync(join(OUT, file), buf);
-  writeFileSync(join(OUT, file + '.gz'), gzipSync(buf, { level: 9 }));
+  writeFileSync(join(OUT, packed), gzipSync(bits === 16 ? grad16(buf, res) : buf, { level: 9 }));
   written.add(file);
-  written.add(file + '.gz');
+  written.add(packed);
   digest = fnv(buf, digest);
-  channels[name] = { file, compressedFile: file + '.gz', res, format: bits === 16 ? 'u16' : 'u8', min, max };
+  channels[name] = { file, compressedFile: packed, res, format: bits === 16 ? 'u16' : 'u8', min, max, ...(bits === 16 ? { filter: 'grad16' as const } : {}) };
 };
 put('height', h, RES, HMIN, HMAX, 16);
 put('shore', shore, RES, -64, 64, 8);

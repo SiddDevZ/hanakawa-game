@@ -12,6 +12,7 @@ import type { GameContext } from '../core/context';
 import type { RGB } from './geom';
 import { causticsNode } from '../water/caustics';
 import { uTime } from '../core/uniforms';
+import { FIRE_GAIN, FIRE_RGB, LAMP_GAIN, WINDOW_GAIN, WINDOW_RGB, flicker, lampColor, lampLevel, windowOn } from './night';
 
 // tsl node graphs are loosely typed here; @types/three generics do not model mixed swizzles well
 type Node = any;
@@ -232,11 +233,14 @@ export function shoji(): MeshStandardNodeMaterial {
   const fade = float(1).sub(smoothstep(0.1, 0.35, max(fwidth(uv().x.div(0.3)), fwidth(uv().y.div(0.36)))));
   const paper = aCol.mul(mx_noise_float(positionWorld.mul(4)).mul(0.04).add(0.97));
   // far away the kumiko fades to its average cover, not to bare paper
-  m.colorNode = mix(paper, vec3(0.2, 0.15, 0.1), mix(float(0.084), bar.mul(0.9), fade));
+  const cover = mix(float(0.084), bar.mul(0.9), fade);
+  m.colorNode = mix(paper, vec3(0.2, 0.15, 0.1), cover);
   m.roughnessNode = float(0.92);
   m.metalnessNode = float(0);
-  // paper glows faintly with light passing through from the far side
-  m.emissiveNode = paper.mul(0.04).mul(float(1).sub(bar.mul(fade)));
+  // paper glows faintly with light passing through from the far side; at night some rooms are lit
+  // (aVar.w = per-panel hash, see Site.add)
+  const lit = vec3(...WINDOW_RGB).mul(windowOn(aVar.w).mul(WINDOW_GAIN)).mul(float(1).sub(cover));
+  m.emissiveNode = paper.mul(0.04).mul(float(1).sub(bar.mul(fade))).add(lit);
   return m;
 }
 
@@ -245,7 +249,10 @@ export const GLOW_TINT: RGB = [1.0, 0.8, 0.52];
 /** aVar.w glow values authored before the lanterns were lit are scaled by this */
 export const GLOW_GAIN = 4.2;
 
-/** chochin paper lanterns: ribbed paper lit from inside (aVar.w = glow strength) */
+/**
+ * chochin paper lanterns: ribbed paper lit from inside. aVar = [flicker phase, night lamp 0..1, 0,
+ * day glow strength]; Site.add fills the phase and marks every day-glowing lantern as a night lamp
+ */
 export function lanternPaper(): MeshStandardNodeMaterial {
   const m = new MeshStandardNodeMaterial();
   // the 3 cm ribs fade to their average once they get smaller than a few pixels (no crawl)
@@ -254,7 +261,9 @@ export function lanternPaper(): MeshStandardNodeMaterial {
   m.colorNode = paper;
   m.roughnessNode = float(0.85);
   m.metalnessNode = float(0);
-  m.emissiveNode = paper.mul(vec3(...GLOW_TINT)).mul(aVar.w.mul(GLOW_GAIN)).mul(float(1).sub(rib.mul(0.6)));
+  const ribK = float(1).sub(rib.mul(0.6));
+  const night = lampColor(paper).mul(aVar.y.mul(lampLevel).mul(flicker(aVar.x)).mul(LAMP_GAIN));
+  m.emissiveNode = paper.mul(vec3(...GLOW_TINT)).mul(aVar.w.mul(GLOW_GAIN)).add(night).mul(ribK);
   m.side = DoubleSide;
   return m;
 }
@@ -281,14 +290,19 @@ export function koshiLattice(set: TexSet): MeshStandardNodeMaterial {
   const t = fract(x).div(duty);
   const inSlat = step(fract(x), duty);
   const edge = smoothstep(0.0, 0.35, fract(x).sub(duty).div(float(1).sub(duty))).mul(float(1).sub(inSlat));
-  const gap = vec3(0.62, 0.56, 0.44).mul(aVar.z).mul(mix(float(1), edge.mul(0.45).add(0.55), fade));
+  const shade = mix(float(1), edge.mul(0.45).add(0.55), fade);
+  const gap = vec3(0.62, 0.56, 0.44).mul(aVar.z).mul(shade);
   m.colorNode = mix(gap, slat, cov);
   // rounded slats: tilt the normal across each slat, fading out with the pattern
   const tilt = t.sub(0.5).mul(1.6).mul(inSlat).mul(fade);
   m.normalNode = (TBNViewMatrix as Node).mul(normalize(vec3(tilt, 0, 1))).normalize();
   m.roughnessNode = mix(float(0.9), float(0.6), cov);
   m.metalnessNode = float(0);
-  m.emissiveNode = gap.mul(float(1).sub(cov)).mul(0.05);
+  // at night lit rooms glow through the gaps where there is paper behind (aVar.z) and the per-panel
+  // hash in aVar.w switches the room on (Site.add fills it)
+  const paperBehind = smoothstep(0.1, 0.3, aVar.z);
+  const lit = vec3(...WINDOW_RGB).mul(windowOn(aVar.w).mul(paperBehind).mul(WINDOW_GAIN)).mul(shade);
+  m.emissiveNode = gap.mul(0.05).add(lit).mul(float(1).sub(cov));
   return m;
 }
 
@@ -430,7 +444,8 @@ export async function createMaterials(ctx: GameContext): Promise<Materials> {
   // vermilion lacquer is glossier and more even than house paint
   const lacquer = paintedWood(ctx, sets.wood_planks_grey, 0.3);
   const hull = surface(ctx, sets.wood_planks_grey, { target: [0.11, 0.085, 0.06], keep: 0.4, contrast: 1.2, normal: 1.0, rough: [0.4, 0.45], macro: 0.08, double: true });
-  const dark = flat(0.6);
+  // dark openings; aVar.y > 0 marks a stone lantern firebox that burns at night (aVar.x = phase)
+  const dark = flat(0.6, 0, vec3(...FIRE_RGB).mul(aVar.y.mul(lampLevel).mul(flicker(aVar.x)).mul(FIRE_GAIN)));
   const plain = flat(0.75);
   plain.side = DoubleSide;
   return {

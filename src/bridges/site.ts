@@ -69,10 +69,15 @@ export class Site {
     for (const [k, geo] of this.geos) {
       const detail = k.startsWith('d:');
       const mk = (detail ? k.slice(2) : k) as MatKey;
+      const mat = mats[mk];
+      if (!mat) {
+        console.warn(`[bridges] ${this.name}: material ${mk} not loaded`);
+        continue;
+      }
       const bg = geo.build();
       if (!bg) continue;
       tris += geo.count / 3;
-      const mesh = new Mesh(bg, mats[mk]);
+      const mesh = new Mesh(bg, mat);
       mesh.name = `${this.name}:${k}`;
       mesh.castShadow = !this.noShadow.has(mk);
       mesh.receiveShadow = true;

@@ -11,6 +11,8 @@
 //    slow in the shallows, soak into beaches and reflect off banks (1 m terrain) and rocks (instances)
 //  - sparse random drops (petals landing, fish rises, drips) keep the whole window alive; rocks in the
 //    current shed small standing ripples downstream
+//  - rain (ctx.services.day): every step each ~0.9 m cell of a randomly offset grid may take a raindrop
+//    (a hashed coin toss, fresh seed per step), so thousands of tiny overlapping rings a second in a storm
 // state (ping-pong, nearest): r = height, g = previous height, b = turbulence, a = hull pressure depth.
 // display (linear, no mips): r = height (m), g/b = slope, a = turbulence; low: quarter-res height for
 // vertex displacement.
@@ -18,8 +20,11 @@ import {
   Color, DataUtils, HalfFloatType, LinearFilter, MeshBasicNodeMaterial, NearestFilter, NoBlending, QuadMesh, RenderTarget, Vector2,
   Vector4, type MagnificationTextureFilter, type Texture,
 } from 'three/webgpu';
-import { abs, clamp, dot, exp, float, max, min, mix, screenUV, select, sin, smoothstep, texture, uniform, uniformArray, vec2, vec4 } from 'three/tsl';
+import {
+  Fn, If, abs, clamp, dot, exp, float, floor, fract, max, min, mix, screenUV, select, sin, smoothstep, texture, uniform, uniformArray, vec2, vec3, vec4,
+} from 'three/tsl';
 import type { GameContext } from '../core/context';
+import type { DayState } from '../core/daycycle';
 import { ANCHORS, HULL } from '../boat/hullSpec';
 
 type N = any;
@@ -31,6 +36,15 @@ const KR = 3;
 const GRAV = 1.0;
 const MAX_ROCKS = 12;
 const MAX_DROPS = 4;
+/** rain grid cell (m): one possible drop per cell per step, landing in the middle 40% so its kernel stays inside */
+const RAIN_CELL = 0.9;
+
+/** sine-free 2d hash (dave hoskins hash22): two values in [0, 1) */
+function hash22(p: N): N {
+  let p3: N = fract(vec3(p.x, p.y, p.x).mul(vec3(0.1031, 0.103, 0.0973)));
+  p3 = p3.add(dot(p3, p3.yzx.add(33.33)));
+  return fract(p3.xx.add(p3.yz).mul(p3.zy));
+}
 
 const sq = (x: N) => x.mul(x);
 
@@ -132,7 +146,9 @@ export class Wake {
   uSize = uniform(64);
   uTexel = uniform(64 / 640);
   enabled = true;
-  info = { cLong: 0, rMax: 0, steps: 0, rocks: 0 };
+  /** follow the day cycle's rain (perf probes turn it off) */
+  weather = true;
+  info = { cLong: 0, rMax: 0, steps: 0, rocks: 0, rainPerSec: 0 };
   private state: [RenderTarget, RenderTarget];
   private cur = 0;
   private stepQuad: [QuadMesh, QuadMesh];
@@ -153,6 +169,10 @@ export class Wake {
   private uDrops = uniformArray(Array.from({ length: MAX_DROPS + 1 }, () => new Vector4(0, 0, 0, 1)), 'vec4');
   /** rocks near the boat: x, z, radius, 0 */
   private uRocks = uniformArray(Array.from({ length: MAX_ROCKS }, () => new Vector4(0, 1e6, 0, 0)), 'vec4');
+  /** rain: drop probability per cell this step (0 = no rain), depth (m), kernel radius (m) */
+  private uRain = uniform(new Vector4());
+  /** per-step rain seed: grid offset (m, x/z) and hash offset */
+  private uRainSeed = uniform(new Vector4());
   private uT = uniform(0);
   private rocks: Float32Array | null = null;
   private rockScan = 0;
@@ -312,6 +332,22 @@ export class Wake {
       const d: N = this.uDrops.element(i);
       kick = kick.add(exp(sq(w.sub(d.xy).length().div(max(d.w, 0.01))).negate()).mul(d.z));
     }
+
+    // rain: a fresh coin toss per cell each step; nothing is evaluated while it is dry
+    const rainKick = Fn(() => {
+      const k = float(0).toVar();
+      If(this.uRain.x.greaterThan(0), () => {
+        const q = uv0.mul(this.uSize).add(this.uRainSeed.xy).div(RAIN_CELL);
+        const id = floor(q);
+        const h0 = hash22(id.add(this.uRainSeed.zw));
+        const h1 = hash22(id.add(this.uRainSeed.wz).add(vec2(37.2, 91.7)));
+        const d = fract(q).sub(h0.mul(0.4).add(0.3)).mul(RAIN_CELL).length().div(this.uRain.z);
+        const drop = exp(d.mul(d).negate()).mul(this.uRain.y).mul(h1.y.add(0.5)).mul(float(1).sub(hullF));
+        k.assign(select(h1.x.lessThan(this.uRain.x), drop, float(0)));
+      });
+      return k;
+    })();
+    kick = kick.add(rainKick);
 
     let hn: N = h.add(vel).sub(conv.mul(deep).mul(dt.mul(dt))).sub(kick);
     // sponge along the grid border so nothing reflects off the domain edge
@@ -499,11 +535,27 @@ export class Wake {
     if (sp) drops[MAX_DROPS].set(sp.x, sp.z, Math.min(0.04, 0.008 + sp.s * 0.006), 0.4 + Math.min(sp.s, 4) * 0.1);
     this.splash = null;
 
+    // rain: drops per m^2 per second (~1000 a second over the 64 m window in rain, ~2500 in a storm, so
+    // the rings overlap); size and depth grow with the downpour. kernel ~1 texel so each drop rings
+    // instead of exciting grid noise
+    const day = this.weather ? (ctx.services.day as DayState | undefined) : undefined;
+    const rain = day?.rain ?? 0, storm = day?.storm ?? 0;
+    const rainU = this.uRain.value as Vector4;
+    const density = rain * (0.25 + 0.35 * storm);
+    rainU.set(
+      steps ? density * RAIN_CELL * RAIN_CELL * dt : 0,
+      0.0035 + 0.0025 * rain + 0.002 * storm,
+      tex * (0.85 + 0.35 * rain),
+      0,
+    );
+    this.info.rainPerSec = Math.round(density * this.size * this.size);
+
     for (let i = 0; i < steps; i++) {
       (this.uShift.value as Vector2).set(i === 0 ? shiftX : 0, i === 0 ? shiftZ : 0);
       this.uDt.value = dt;
       this.uDtRatio.value = Math.min(2, dt / this.prevDt);
       if (i === 1) for (const d of drops) d.z = 0;
+      if (rainU.x > 0) (this.uRainSeed.value as Vector4).set(Math.random() * RAIN_CELL, Math.random() * RAIN_CELL, Math.random() * 500, Math.random() * 500);
       r.setRenderTarget(this.state[1 - this.cur]);
       this.stepQuad[this.cur].render(r);
       this.cur = 1 - this.cur;

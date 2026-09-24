@@ -1,7 +1,8 @@
 // render module (owner: render/lighting): sun + cascaded shadows, photographed sky with an analytic
 // sun disc, ibl from the same sky, height-aware aerial perspective, post pipeline, tone mapping.
 // publishes ctx.services.render (see RenderService) for modules that need the haze or sky.
-import { ACESFilmicToneMapping, AgXToneMapping, NeutralToneMapping, type Node } from 'three/webgpu';
+import { ACESFilmicToneMapping, AgXToneMapping, NeutralToneMapping, Vector3, type Node } from 'three/webgpu';
+import { pmremTexture, uniform } from 'three/tsl';
 import type { GameContext } from '../core/context';
 import type { QualityPreset } from '../core/settings';
 import { TUNE, type ToneMapName } from './config';
@@ -12,6 +13,8 @@ import { RIVER_LENGTH, riverFrame } from '../world/layout';
 import { Post, uAOStrength, uGrade, type PostOptions } from './post';
 import { BounceProbes } from './probes';
 import { Birds } from './birds';
+import { Rain } from './rain';
+import { DayLight } from './daylight';
 
 export interface RenderService {
   sun: Sun;
@@ -34,6 +37,12 @@ export interface RenderService {
   skyReflection: SkyData['reflection'];
   /** 1 draws the sun disc in the background; set 0 around a reflection render if needed */
   sunDisc: SkyNodes['sunDisc'];
+  /** the time-of-day / weather grade of the visible sky, for another sky lookup (e.g. the water's
+   *  skyReflection fallback): gradeSky(color, worldDir). identity in the authored look */
+  gradeSky: SkyNodes['gradeSky'];
+  /** rgb multiplier on the scene ibl (warm at twilight, blue at night); scene.environmentIntensity scales it */
+  envTint: ReturnType<typeof uniform>;
+  rain: Rain | null;
   post: () => Post | null;
   probes: () => BounceProbes | null;
   setToneMapping(name: ToneMapName, exposure?: number): void;
@@ -74,6 +83,9 @@ export async function init(ctx: GameContext) {
   const skyNodes = createSkyNode(sky, sun.dir, (d) => atmosphere.hazeColor(d), (c, d) => atmosphere.applySkyMist(c, d), (d) => atmosphere.airTint(d));
   scene.backgroundNode = skyNodes.node;
   scene.environment = sky.environment;
+  // the same ibl through an rgb tint (identity in the authored look), so time of day can color it
+  const envTint = uniform(new Vector3(1, 1, 1));
+  scene.environmentNode = (pmremTexture(sky.environment) as any).mul(envTint);
   scene.environmentIntensity = TUNE.env.intensity;
   scene.fogNode = atmosphere.fogNode;
 
@@ -145,6 +157,16 @@ export async function init(ctx: GameContext) {
   } catch (e) {
     console.warn('[render] birds unavailable', e);
   }
+  // rain streaks and the time-of-day driver (order -110: after the day cycle, before shared uniforms)
+  let rain: Rain | null = null;
+  try {
+    rain = new Rain(scene);
+  } catch (e) {
+    console.warn('[render] rain unavailable', e);
+  }
+  const daylight = new DayLight({ ctx, sun, skyNodes, atmosphere, envTint, post: () => post, probes: () => probes, rain });
+  ctx.onUpdate(() => daylight.update(), -110);
+
   ctx.events.on('resize', () => sun.resize());
   ctx.events.on('quality', (q: QualityPreset) => {
     sun.applyQuality(q);
@@ -160,6 +182,9 @@ export async function init(ctx: GameContext) {
     transmittance: (p) => atmosphere.transmittance(p),
     skyReflection: sky.reflection,
     sunDisc: skyNodes.sunDisc,
+    gradeSky: skyNodes.gradeSky,
+    envTint,
+    rain,
     post: () => post,
     probes: () => probes,
     setToneMapping,

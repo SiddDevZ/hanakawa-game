@@ -4,12 +4,13 @@
 // boat leaves glassy ridges, not white water (./spray is kept but unused).
 // publishes ctx.services.water (see WaterService below).
 import {
-  FloatType, Group, Light, Matrix4, Mesh, MeshBasicNodeMaterial, MeshStandardNodeMaterial, QuadMesh, RenderTarget, SphereGeometry,
+  Color, FloatType, Group, Light, Matrix4, Mesh, MeshBasicNodeMaterial, MeshStandardNodeMaterial, QuadMesh, RenderTarget, SphereGeometry,
   Texture, Vector2, Vector3, Vector4,
 } from 'three/webgpu';
 import { float, int, screenCoordinate, uniformArray, vec4 } from 'three/tsl';
 import type { GameContext } from '../core/context';
 import type { QualityPreset } from '../core/settings';
+import type { DayState } from '../core/daycycle';
 import { LAYERS } from '../core/layers';
 import { uWaveAmp, uWindDir, uWindStrength } from '../core/uniforms';
 import { waterHeight } from '../world/waves';
@@ -49,7 +50,47 @@ export interface WaterService {
     info(): Record<string, unknown>;
     /** readback stats of the wave sim display */
     wakeProbe(): Promise<Record<string, unknown>>;
+    /** perf probes: false makes the water ignore the day cycle (defaults look, no rain drops); 'sim' keeps
+     *  only the wave sim's rain, 'mat' only the material's response */
+    weather(on: boolean | 'sim' | 'mat'): void;
   };
+}
+
+// time and weather looks for the water (multiplied in by amount; all neutral at 0)
+const SKY_NIGHT_H = [0.07, 0.085, 0.13], SKY_NIGHT_Z = [0.035, 0.05, 0.1];
+const SKY_CLOUD_H = [0.9, 0.9, 0.88], SKY_CLOUD_Z = [0.95, 0.88, 0.76];
+const SKY_TWI_H = [1.35, 0.92, 0.66], SKY_TWI_Z = [0.95, 0.82, 0.92];
+const BODY_NIGHT = [0.3, 0.36, 0.52], BODY_TWI = [1.12, 0.96, 0.8], BODY_CLOUD = [0.86, 0.9, 0.93];
+const FLASH = [0.75, 0.8, 1.0];
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+function grade(out: Color, t: [number[], number][]) {
+  let r = 1, g = 1, b = 1;
+  for (const [c, k] of t) {
+    r *= lerp(1, c[0], k);
+    g *= lerp(1, c[1], k);
+    b *= lerp(1, c[2], k);
+  }
+  out.setRGB(r, g, b);
+}
+
+/** push the day cycle into the water uniforms; with the defaults (all 0) every value is neutral */
+function applyDay(u: WaterUniforms, day: DayState | undefined, windStrength: number) {
+  const night = day?.night ?? 0, twi = day?.twilight ?? 0, cloud = day?.cloud ?? 0;
+  const rain = day?.rain ?? 0, storm = day?.storm ?? 0, flash = day?.flash ?? 0;
+  // storm gusts and rain whip up the ripples
+  u.uRippleAmp.value = (0.5 + 1.1 * windStrength) * (1 + 1.5 * storm + 0.3 * rain);
+  u.uChop.value = 1 + 0.9 * storm + 0.25 * rain;
+  u.uRainK.value = rain * (1 + 0.5 * storm);
+  // rain softens the mirror: allow a wider blur than the calm river's ripples ever do
+  u.uReflMaxLod.value = 1.6 + 1.3 * rain;
+  // sky fallback: greyer and flatter under cloud, warm low horizon at twilight, navy at night
+  u.uSkyDesat.value = Math.min(1, 0.55 * cloud + 0.35 * night);
+  grade(u.uSkyTintH.value as Color, [[SKY_CLOUD_H, cloud], [SKY_TWI_H, twi], [SKY_NIGHT_H, night]]);
+  grade(u.uSkyTintZ.value as Color, [[SKY_CLOUD_Z, cloud], [SKY_TWI_Z, twi], [SKY_NIGHT_Z, night]]);
+  (u.uSkyAdd.value as Color).setRGB(FLASH[0] * flash * 0.6, FLASH[1] * flash * 0.6, FLASH[2] * flash * 0.6);
+  u.uReflGain.value = 1 + 1.4 * flash;
+  (u.uFlashCol.value as Color).setRGB(FLASH[0] * flash * 1.2, FLASH[1] * flash * 1.2, FLASH[2] * flash * 1.2);
+  grade(u.uBodyTint.value as Color, [[BODY_CLOUD, cloud], [BODY_TWI, twi * 0.6], [BODY_NIGHT, night]]);
 }
 
 // wave sim grid: ~0.1 m cells carry the short ripple rings; the window follows the boat
@@ -185,6 +226,7 @@ export async function init(ctx: GameContext) {
   const size = new Vector2();
   let maskWanted = true;
   let particlesOn = true;
+  let weatherOn = true;
 
   function update(c: GameContext) {
     const cam = c.camera;
@@ -196,9 +238,12 @@ export async function init(ctx: GameContext) {
     const wo = u.uWindOff.value as Vector2;
     wo.x = (wo.x - (WIND_LAYER.speed * dt) / WIND_LAYER.tile) % 1;
     const g = u.uGustOff.value as Vector2;
-    g.x = (g.x - (wind.x * dt * 1.2) / 260) % 1;
-    g.y = (g.y - (wind.y * dt * 1.2) / 260) % 1;
-    u.uRippleAmp.value = 0.5 + 1.1 * (uWindStrength.value as number);
+    const day = weatherOn ? (c.services.day as DayState | undefined) : undefined;
+    // storm gusts race across the river
+    const gustRate = 1.2 * (1 + 2.5 * (day?.storm ?? 0));
+    g.x = (g.x - (wind.x * dt * gustRate) / 260) % 1;
+    g.y = (g.y - (wind.y * dt * gustRate) / 260) % 1;
+    applyDay(u, day, uWindStrength.value as number);
     const sy = Math.max(0.05, c.sun.direction.y);
     u.uSunCosRefr.value = Math.sqrt(Math.max(0.2, 1 - (1 - sy * sy) / 1.769));
     c.renderer.getDrawingBufferSize(size);
@@ -219,7 +264,9 @@ export async function init(ctx: GameContext) {
       lightScan = 120;
       lights = [];
       c.scene.traverse((o) => { if ((o as Light).isLight && (o as any).shadow && o.castShadow) lights.push(o as Light); });
-      const e = c.scene.environment;
+      // same source as build(): comparing scene.environment against the sky reflection never matched,
+      // which rebuilt the material and its mirror every 120 frames (a periodic hitch)
+      const e = (c.services.render as { skyReflection?: Texture } | undefined)?.skyReflection ?? c.scene.environment;
       if ((e && (e as Texture).isTexture ? e : null) !== env) build();
     }
 
@@ -293,6 +340,7 @@ export async function init(ctx: GameContext) {
       markers: setMarkers,
       setWake: (on: boolean) => { wake.enabled = on; particlesOn = on; falls.group.visible = on; },
       wakeProbe: () => wake.probe(ctx),
+      weather: (on) => { weatherOn = on === true || on === 'mat'; wake.weather = on === true || on === 'sim'; },
       info: () => ({
         m: spec.m, levels: spec.levels, extent: spec.extent, triangles: (mesh.geometry.index?.count ?? 0) / 3,
         reflectionScale: refl?.reflector.resolutionScale, reflectionSamples: reflSamples, env: !!env, wakeRes: wake.res, wakeSize: wake.size,

@@ -13,10 +13,13 @@
 //  - foam only where it belongs: gentle lapping at the banks, current breaking on rocks, falls and
 //    weir churn (capsule sources); the boat's waves (./wake sim) shade and bend the mirror, never whiten
 //  - hull mask from the boat model's tsl hull lines: no water inside the boat below the gunwale
+//  - time and weather (src/core/daycycle.ts): rain rings and rain roughness, storm chop, a lightning lift
+//    on the reflection and specular, a darker body at night (the key light is the moon then, so its glint is the moon's), warm twilight. every term
+//    is neutral (x1, +0) or skipped by a uniform branch while the day cycle sits at its defaults
 import { Color, LightingModel, Matrix4, MeshStandardNodeMaterial, Texture, Vector2, Vector3, Vector4 } from 'three/webgpu';
 import {
   D_GGX, F_Schlick, If, V_GGX_SmithCorrelated, abs, cameraPosition, cameraProjectionMatrix, cameraProjectionMatrixInverse,
-  cameraViewMatrix, cameraWorldMatrix, clamp, dot, exp, float, fract, fwidth, getViewPosition, log2, max, min, mix,
+  cameraViewMatrix, cameraWorldMatrix, clamp, cos, dot, exp, float, floor, fract, fwidth, getViewPosition, log2, max, min, mix,
   normalize, pmremTexture, positionView, positionWorld, pow, reflect, reflector, saturate, screenUV, select, sin,
   smoothstep, sqrt, texture, uniform, uniformArray, varying, vec2, vec3, vec4, viewportDepthTexture, viewportSharedTexture,
 } from 'three/tsl';
@@ -62,6 +65,22 @@ export function createWaterUniforms() {
     uGlint: uniform(1),
     uSkyHorizon: uniform(new Color(0.62, 0.76, 0.88)),
     uSkyZenith: uniform(new Color(0.16, 0.36, 0.7)),
+    // time and weather (set each frame from ctx.services.day; the defaults are exactly neutral)
+    /** sky fallback grade: desaturation (overcast), then horizon/zenith tints and an additive flash lift */
+    uSkyDesat: uniform(0),
+    uSkyTintH: uniform(new Color(1, 1, 1)),
+    uSkyTintZ: uniform(new Color(1, 1, 1)),
+    uSkyAdd: uniform(new Color(0, 0, 0)),
+    /** whole reflection gain (lightning) */
+    uReflGain: uniform(1),
+    /** in-scatter tint: navy and darker at night, warm at twilight, greyer under cloud */
+    uBodyTint: uniform(new Color(1, 1, 1)),
+    /** flow ripple amplitude (storm chop) */
+    uChop: uniform(1),
+    /** rain on the surface 0..1+: ring layers and roughness */
+    uRainK: uniform(0),
+    /** lightning sheen on the fresnel reflection */
+    uFlashCol: uniform(new Color(0, 0, 0)),
     uBoatInv: uniform(new Matrix4()),
     uMaskOn: uniform(0),
     uWakeOn: uniform(0),
@@ -134,6 +153,8 @@ class WaterLightingModel extends LightingModel {
     const { irradiance, iblIrradiance, reflectedLight } = builder.context;
     const amb = irradiance.add(iblIrradiance).mul(1 / Math.PI);
     reflectedLight.indirectSpecular.addAssign(s.reflection.mul(s.reflMask));
+    // lightning: the whole sky lights up for a moment, so the fresnel reflection flares
+    reflectedLight.indirectSpecular.addAssign(vec3(s.flashCol).mul(s.reflMask));
     const body = s.refraction.mul(s.transmit).add(amb.mul(s.scatter).mul(s.inscatter)).mul(s.bodyMask);
     reflectedLight.indirectDiffuse.addAssign(body.add(amb.mul(s.foamAlbedo).mul(s.foam)));
     // debug views replace the whole result
@@ -165,6 +186,38 @@ export interface BuildOptions {
   reflectionScale: number;
   reflectionSamples: number;
   env: Texture | null;
+}
+
+/** sine-free 2d hash (dave hoskins hash22): two values in [0, 1) */
+function hash22(p: N): N {
+  let p3: N = fract(vec3(p.x, p.y, p.x).mul(vec3(0.1031, 0.103, 0.0973)));
+  p3 = p3.add(dot(p3, p3.yzx.add(33.33)));
+  return fract(p3.xx.add(p3.yz).mul(p3.zy));
+}
+
+/**
+ * one layer of rain rings: every `cell` metres a drop lands at a random spot and a ring runs out and
+ * fades, `rate` times a second, in a random fraction `cover` of the cells. rings stay inside their cell
+ * (centre in the middle third, radius < 0.3 cell) so one cell lookup is enough. returns the surface
+ * slope, faded out where the pixel footprint is wider than the ring (the caller adds that as roughness)
+ */
+function rainRings(p: N, t: N, cell: number, rate: number, cover: N, seed: number, footprint: N): N {
+  const q = p.div(cell).add(seed);
+  const id = floor(q), f = fract(q);
+  const h0 = hash22(id);
+  const ph = t.mul(h0.y.mul(0.4).add(0.8).mul(rate)).add(h0.x);
+  const n = floor(ph), a = fract(ph);
+  const h1 = hash22(id.add(n.mul(vec2(7.31, 3.17))));
+  const live = select(fract(h1.x.add(h1.y).mul(17.13)).lessThan(cover), float(1), float(0));
+  const dv = f.sub(h1.mul(0.36).add(0.32));
+  const d = max(dv.length(), 1e-3);
+  const w = a.mul(0.04).add(0.06);
+  const x = d.sub(a.mul(0.3)).div(w);
+  const prof = exp(x.mul(x).negate()).mul(cos(x.mul(2.2)));
+  const fade = float(1).sub(smoothstep(0.35 * 0.06 * cell, 1.2 * 0.06 * cell, footprint));
+  const life = float(1).sub(a);
+  const amp = life.mul(life).mul(live).mul(fade);
+  return dv.div(d).mul(prof.mul(amp));
 }
 
 /** distance from p to the segment a-b (all vec2 nodes) */
@@ -270,7 +323,7 @@ export function buildWaterMaterial(o: BuildOptions) {
     // ripples: flow layers (lean moments blended across the two phases) + downwind cat's paws
     let rs: N = vec2(0);
     let rv: N = float(0);
-    const flowAmp = mix(0.2, 1, current).mul(churnV.mul(2.5).add(1)).mul(mix(float(1), float(0.55), saturate(wakeTurb.mul(1.6)))).mul(wakeFoam.mul(1.2).add(1));
+    const flowAmp = mix(0.2, 1, current).mul(u.uChop).mul(churnV.mul(2.5).add(1)).mul(mix(float(1), float(0.55), saturate(wakeTurb.mul(1.6)))).mul(wakeFoam.mul(1.2).add(1));
     FLOW_LAYERS.forEach((l, j) => {
       const ang = (l.angleDeg * Math.PI) / 180;
       const dir = vec2(Math.cos(ang), Math.sin(ang)), perp = vec2(-Math.sin(ang), Math.cos(ang));
@@ -290,6 +343,21 @@ export function buildWaterMaterial(o: BuildOptions) {
       rs = rs.add(wd.mul(tw.x).add(wp.mul(tw.y)).mul(a));
       rv = rv.add(max(tw.z.sub(tw.x.mul(tw.x)), 0).add(max(tw.w.sub(tw.y.mul(tw.y)), 0)).mul(a.mul(a)).mul(0.5));
     }
+    // rain: two ring layers (the second on a rotated grid) plus roughness where the rings are sub-pixel;
+    // the wave sim already carries its own rain rings around the boat, so these ease off there
+    const rainS = vec2(0).toVar('wRainS');
+    const rainV = float(0).toVar('wRainV');
+    If(u.uRainK.greaterThan(0.001), () => {
+      const cover = saturate(u.uRainK.mul(0.8));
+      const e1 = vec2(0.799, 0.602), e2 = vec2(-0.602, 0.799);
+      const s1 = rainRings(r, t, 0.7, 1.25, cover, 0, footprint);
+      const s2 = rainRings(vec2(dot(r, e1), dot(r, e2)), t, 0.45, 1.6, cover, 17, footprint);
+      const k = min(u.uRainK, 1.5).mul(0.3).mul(float(1).sub(wEdge.mul(0.4)));
+      rainS.assign(s1.add(e1.mul(s2.x)).add(e2.mul(s2.y)).mul(k));
+      rainV.assign(u.uRainK.mul(smoothstep(0.008, 0.04, footprint).mul(0.0016).add(0.0005)));
+    });
+    rs = rs.add(rainS);
+    rv = rv.add(rainV);
     const slope = gs.add(rs).add(wakeSlope).toVar('wSlope');
     const variance = rv.add(g.lost).add(wakeLost).add(wakeTurb.mul(0.0006)).add(churnV.mul(0.02)).toVar('wVar');
 
@@ -362,7 +430,7 @@ export function buildWaterMaterial(o: BuildOptions) {
     const sigT = u.uSigmaA.add(sigS);
     const transmitRaw = exp(sigT.mul(lView.add(lSun)).negate());
     const inscatter = float(1).sub(exp(sigT.mul(lView).negate())).toVar('wIn');
-    const scatter = sigS.div(sigT).mul(u.uScatterGain).add(vec3(0.03, 0.05, 0.05).mul(bubbles));
+    const scatter = sigS.div(sigT).mul(u.uScatterGain).add(vec3(0.03, 0.05, 0.05).mul(bubbles)).mul(vec3(u.uBodyTint as N));
 
     // ---------- reflection ----------
     // the fine ripples gently distort the mirror; the wake swells bend it into bands (below)
@@ -393,13 +461,17 @@ export function buildWaterMaterial(o: BuildOptions) {
     const planarW = rEdge.mul(u.uReflOn);
     const rough = pow(variance.mul(2).add(0.0016), 0.25);
     let skyCol: N;
+    const kz = pow(saturate(R.y), 0.42);
     if (envTex) {
       skyCol = pmremTexture(envTex, R, rough);
     } else {
-      const k = pow(saturate(R.y), 0.42);
-      skyCol = mix(vec3(u.uSkyHorizon as N), vec3(u.uSkyZenith as N), k);
+      skyCol = mix(vec3(u.uSkyHorizon as N), vec3(u.uSkyZenith as N), kz);
     }
-    const reflection = mix(skyCol, refl.rgb, planarW);
+    // the sky texture is the authored morning: grade it to the time and weather (identity by default).
+    // the planar mirror is left alone, it already shows the live sky and the lantern glows
+    skyCol = mix(skyCol, vec3(dot(skyCol, vec3(0.2126, 0.7152, 0.0722))), u.uSkyDesat)
+      .mul(mix(vec3(u.uSkyTintH as N), vec3(u.uSkyTintZ as N), kz)).add(vec3(u.uSkyAdd as N));
+    const reflection = mix(skyCol, refl.rgb, planarW).mul(u.uReflGain);
 
     // ---------- fresnel and masks ----------
     const alpha2 = variance.mul(2).add(0.035 * 0.035);
@@ -419,6 +491,7 @@ export function buildWaterMaterial(o: BuildOptions) {
       scatter,
       inscatter,
       bodyMask: float(1).sub(fres).mul(open),
+      flashCol: u.uFlashCol,
       debug: u.uDebug,
       wakeDbg: vec3(wc.r.mul(8).add(0.5), wakeTurb, wakeSlope.length()).mul(wEdge.mul(0.9).add(0.1)),
       flowDbg: vec3(flow.x.mul(1.5).add(0.5), flow.y.mul(1.5).add(0.5), current),

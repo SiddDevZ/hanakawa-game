@@ -6,7 +6,9 @@
 // layers: engine (./engine), hull water + slaps + thuds + creaks (./hull), river bed + spatial bank
 // voices (./river), waterfalls and the weir (./falls), wind in leaves and gorge bamboo (./wind),
 // forest birds and a distant cuckoo (./birds), village furin chimes (./village), the temple bell
-// (./temple), ui cues (./ui). ./site tracks where the listener is along the river.
+// (./temple), ui cues (./ui), and the day cycle's rain, thunder, storm wind and night chorus (./weather,
+// built only once the time-lapse or a weather/night value asks for it). ./site tracks where the listener
+// is along the river.
 import { Quaternion, Vector3 } from 'three/webgpu';
 import type { GameContext } from '../core/context';
 import type { Settings } from '../core/settings';
@@ -22,6 +24,7 @@ import { Falls } from './falls';
 import { Birds } from './birds';
 import { Village } from './village';
 import { Temple } from './temple';
+import { Weather } from './weather';
 import { createSite, updateSite } from './site';
 import { UiSounds, UI_SOUNDS, type PlayOptions } from './ui';
 
@@ -55,6 +58,7 @@ class AudioSystem {
   birds: Birds;
   village: Village;
   temple: Temple;
+  weather: Weather;
   ui: UiSounds;
   /** set by the 'pause' event, cleared by 'resume'; ctx.paused alone also ducks */
   pauseEvent = false;
@@ -92,6 +96,7 @@ class AudioSystem {
     this.birds = new Birds(this.env, ctx);
     this.village = new Village(this.env, ctx);
     this.temple = new Temple(this.env, ctx);
+    this.weather = new Weather(this.env, this.birds);
     this.ui = new UiSounds(this.env);
     samples.decodeAll(this.ac).catch((e) => console.warn('[audio] sample decode failed', e));
     this.lastT = this.ac.currentTime;
@@ -145,6 +150,7 @@ class AudioSystem {
     this.wind.update(ctx, dt);
     this.river.update(t, dt);
     this.falls.update(t);
+    this.weather.update(ctx, dt);
     this.birds.update(t);
     this.village.update(t);
     this.temple.update(t);
@@ -169,6 +175,7 @@ class AudioSystem {
       nearestChime: Math.round(this.village.nearest),
       bellStrikes: this.temple.strikes,
       bellDist: Math.round(this.temple.dist),
+      weather: this.weather.stats(),
       samples: {
         ready: this.samples.ready,
         birds: Object.fromEntries(Object.entries(this.samples.birds).map(([k, v]) => [k, v.length])),
@@ -181,7 +188,9 @@ class AudioSystem {
 
 export async function init(ctx: GameContext) {
   const samples = new Samples();
-  samples.prefetch();
+  // the recordings are only heard after the first key press: keep them off the wire until the valley
+  // is on screen (decoding fetches them itself if audio starts first)
+  ctx.events.on('app:revealed', () => samples.prefetch());
   let sys: AudioSystem | null = null;
   let failed = false;
 
@@ -246,6 +255,7 @@ export async function init(ctx: GameContext) {
   ev.on('objective:completed', () => sys?.ui.play('complete'));
   ev.on('discovery', () => sys?.ui.play('discovery'));
   ev.on('unlock', () => sys?.ui.play('unlock'));
+  ev.on('weather:lightning', (p) => sys?.weather.thunder(p));
 
   ctx.onUpdate((c) => sys?.update(c), 80);
 

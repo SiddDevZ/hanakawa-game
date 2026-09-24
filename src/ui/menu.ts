@@ -163,7 +163,7 @@ export class Menu {
     return h('div', { class: 'row' }, h('label', { class: 'row-label', for: id, text: label }), out, h('div', { class: 'row-slider' }, input));
   }
 
-  private toggle(label: string, key: 'invertY' | 'showMarker') {
+  private toggle(label: string, key: 'invertY' | 'showMarker' | 'timeLapse') {
     const id = `set-${++uid}`;
     const input = h('input', { class: 'switch', type: 'checkbox', role: 'switch', id });
     input.addEventListener('change', () => this.set({ [key]: input.checked } as Partial<Settings>));
@@ -204,6 +204,11 @@ export class Menu {
         h('legend', { class: 'group-title', text: 'Graphics' }),
         this.segmented<QualityName>('Quality', 'quality', [['low', 'Low'], ['balanced', 'Balanced'], ['high', 'High']]),
         h('p', { class: 'note', text: note }),
+      ),
+      h('fieldset', { class: 'group' },
+        h('legend', { class: 'group-title', text: 'World' }),
+        this.toggle('Time-lapse: a full day every 15 seconds', 'timeLapse'),
+        h('p', { class: 'note', text: 'Runs through dawn, clouds, rain, a thunderstorm and a starry night on repeat. Off keeps the clear spring morning.' }),
       ),
       h('fieldset', { class: 'group' },
         h('legend', { class: 'group-title', text: 'Camera' }),

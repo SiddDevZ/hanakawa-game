@@ -59,6 +59,8 @@ export interface Settings {
   invertY: boolean;
   showMarker: boolean;
   units: 'knots' | 'kmh';
+  /** a whole day every 15 s with changing weather (src/core/daycycle.ts) */
+  timeLapse: boolean;
 }
 
 const KEY = 'luma-coast/settings/v1';
@@ -73,6 +75,7 @@ export const DEFAULT_SETTINGS: Settings = {
   invertY: false,
   showMarker: true,
   units: 'knots',
+  timeLapse: false,
 };
 
 export function loadSettings(): Settings {
