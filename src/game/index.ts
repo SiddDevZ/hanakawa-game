@@ -11,6 +11,7 @@ import { LanternRun } from './lanterns';
 import { Cargo } from './cargo';
 import { clearSave, emptySave, loadSave, writeSave, type ObjectiveSave, type SaveData } from './save';
 import { assignRewards, paintList, type PaintInfo } from './paints';
+import { track } from '../core/analytics';
 import type { GameService, GatePoint, HintKey, ObjectiveDef, ObjectiveStatus, ObjectiveView, PaintView, PoiView, PromptView, RouteView, TargetView, ToastView } from './types';
 
 export async function init(ctx: GameContext) {
@@ -211,6 +212,7 @@ class Game {
 
   private finale() {
     if (!OBJECTIVES.every((x) => this.status(x) === 'done')) return;
+    track('journey_completed');
     this.toast({ tone: 'complete', eyebrow: 'Journey complete', title: 'The whole river', detail: 'Drift wherever the light is good.' });
   }
 

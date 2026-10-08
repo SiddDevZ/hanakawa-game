@@ -19,6 +19,7 @@ import { installGzipFetch } from './core/compression';
 import { installPrefetch } from './core/prefetch';
 import { releaseUploaded } from './core/memory';
 import { Streamer } from './core/stream';
+import { track } from './core/analytics';
 
 type Module = { init(ctx: GameContext): Promise<unknown> | unknown };
 
@@ -242,6 +243,8 @@ async function boot() {
   // stamped before app:revealed, whose handlers start the after-reveal downloads
   startup.firstViewMs = startup.firstPlayableMs = Math.round(performance.now());
   events.emit('app:revealed');
+  track('game_loaded', { load_seconds: Math.round(startup.firstViewMs / 1000) });
+  events.on('objective:completed', (p: { id: string }) => track('objective_completed', { objective: p.id }));
   // merged static geometry keeps a cpu copy until the gpu holds it; sweep now and as late builds land
   const sweep = () => { const freed = releaseUploaded(ctx); if (freed) console.info(`[luma] released ${Math.round(freed / 1048576)} MB of uploaded geometry`); };
   sweep();
@@ -317,5 +320,6 @@ function warmPipelines(ctx: GameContext) {
 
 boot().catch((e) => {
   console.error('[luma] boot failed', e);
+  track('game_load_failed');
   loading.fail('The valley could not load: ' + (e?.message || e) + '. Reload the page to try again.');
 });
